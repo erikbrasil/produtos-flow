@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Produtos Flow — marcar produtos no YouTube Studio
 // @namespace    produtos-flow.cortes
-// @version      1.3.0
+// @version      1.4.0
 // @description  Escolhe produtos ligados ao convidado e ao assunto do corte, marca no Studio, distribui os tempos e PARA para conferência humana. Não salva nada sozinho. Sem IA.
 // @match        https://studio.youtube.com/*
 // @grant        GM_xmlhttpRequest
@@ -32,7 +32,7 @@
 
 (function () {
   'use strict';
-  const VERSAO = '1.3.0';
+  const VERSAO = '1.4.0';
 
   // ====================================================================================
   //  LISTAS — para acrescentar convidado ou tema, copie um bloco e troque os textos.
@@ -106,7 +106,7 @@
     },
     'geopolitica': {
       nome: 'Geopolítica',
-      chaves: ['geopolitic*', 'guerra*', 'europa', 'europeu*', 'europeia*', 'china', 'chines*', 'russia', 'russo*', 'eua', 'estados unidos', 'otan', 'nato', 'israel', 'ira', 'ucrania', 'imigra*', 'imigrante*', 'oriente medio', 'crise mundial', 'continente', 'trump', 'putin', 'palestina', 'gaza', 'venezuela'],
+      chaves: ['geopolitic*', 'guerra*', 'europa', 'europeu*', 'europeia*', 'china', 'chines*', 'russia', 'russo*', 'eua', 'estados unidos', 'otan', 'nato', 'israel', 'ira', 'ucrania', 'imigra*', 'imigrante*', 'oriente medio', 'crise mundial', 'continente', 'trump', 'putin', 'palestina', 'gaza', 'venezuela', 'militar*', 'marinha', 'exercito', 'forcas armadas', 'defesa', 'nuclear', 'missil*', 'misseis'],
       buscas: [
         ['Livro geopolítica', [['livro', 'box'], ['geopolitic*']]],
         ['Atlas geográfico', [['atlas']]],
@@ -410,8 +410,22 @@
   }
 
   // Monta a fila de buscas: convidado primeiro, depois assuntos, depois o padrão.
+  // Lojas muitas vezes não escrevem "Livro" no nome ("Geografia Política e Geopolítica").
+  // Então o grupo "livro" não é exigido; em troca, recusa brinde/roupa nas buscas de livro.
+  const PALAVRAS_LIVRO = ['livro', 'livros', 'livro*', 'box', 'manual', 'curso'];
+  const RECUSA_LIVRO = ['camiseta', 'camisa', 'caneca', 'adesivo', 'quadro', 'poster', 'chaveiro', 'pelucia', 'fantoche', 'boneco', 'moletom', 'bone', 'capinha', 'case', 'mousepad'];
+  function semLivro(exige) {
+    const resto = exige.filter(g => !g.every(w => PALAVRAS_LIVRO.includes(w)));
+    return resto.length ? resto : exige;
+  }
+  const ehPessoa = t => /\([^)]*\b(1[89]\d\d|20[0-2]\d)\b[^)]*\)/.test(t) || /\b[ée] (um|uma) [^.]{0,60}\b(brasileir[oa]|portugu[eê]s[a]?)\b/i.test(t);
+  const ehBuscaDeLivro = b => /^(livro|box)\b/i.test(norm(b));
+  // nome de uma palavra só ("Rubão") tem muito xará: o produto precisa ter também palavra do assunto
+  const umaPalavra = c => !c.extra && c.desconhecido && norm(c.nome.replace(/\(.*\)/, '')).split(' ').length === 1;
+
   function planoDeBuscas(det, coringas) {
     const fila = [];
+    const chavesAssunto = det.temas.flatMap(t => TEMAS[t.id].chaves);
     for (const c of det.citados || []) {
       for (const b of c.buscas) fila.push({ busca: b, exige: [c.exige], recusa: [], origem: 'citado', rotulo: c.nome });
     }
@@ -422,14 +436,19 @@
       }
       const buscasConv = [...c.buscas];
       if (c.desconhecido && det.temas.some(t => t.id === 'musica')) buscasConv.push(c.nome + ' CD', c.nome + ' vinil');
+      if (umaPalavra(c) && !chavesAssunto.length) continue; // sem assunto não dá para separar dos xarás
       for (const b of buscasConv) {
         // convidado extra: o produto precisa ter o nome dele OU todas as palavras da busca
-        const exige = c.exigePorBusca && !tem(b, c.apelidos[0]) ? palavrasFortes(b).map(w => [w + '*']) : [c.exige];
-        fila.push({ busca: b, exige: exige.length ? exige : [c.exige], recusa: [], origem: 'convidado', rotulo: c.nome });
+        let exige = c.exigePorBusca && !tem(b, c.apelidos[0]) ? palavrasFortes(b).map(w => [w + '*']) : [c.exige];
+        if (!exige.length) exige = [c.exige];
+        if (umaPalavra(c)) exige = [...exige, chavesAssunto];
+        fila.push({ busca: b, exige, recusa: umaPalavra(c) ? RECUSA_LIVRO : [], origem: 'convidado', rotulo: c.nome });
       }
     }
     for (const t of det.temas) {
-      for (const [b, exige, recusa] of TEMAS[t.id].buscas) fila.push({ busca: b, exige, recusa: recusa || [], origem: 'tema', rotulo: t.nome });
+      for (const [b, exige, recusa] of TEMAS[t.id].buscas) {
+        fila.push({ busca: b, exige: semLivro(exige), recusa: [...(recusa || []), ...(ehBuscaDeLivro(b) || exige.some(g => g.includes('livro')) ? RECUSA_LIVRO : [])], origem: 'tema', rotulo: t.nome });
+      }
     }
     const listaCoringa = (coringas && coringas.length ? coringas : CORINGAS_PADRAO);
     for (const b of listaCoringa) {
@@ -498,7 +517,7 @@
   const mmss = s => Math.floor(s / 60) + ':' + String(Math.floor(s % 60)).padStart(2, '0');
 
   if (typeof module !== 'undefined' && module.exports) {
-    module.exports = { repetido, CITADOS, CORINGAS_PADRAO, norm, tem, detectar, planoDeBuscas, aceita, escolher, planoDeTempos, linkEpisodio, nomeDoEpisodio, nomesDoEpisodio, titulo1, limparDescricao, lerExtras, CONVIDADOS, TEMAS, INDISPONIVEL };
+    module.exports = { ehPessoa, repetido, CITADOS, CORINGAS_PADRAO, norm, tem, detectar, planoDeBuscas, aceita, escolher, planoDeTempos, linkEpisodio, nomeDoEpisodio, nomesDoEpisodio, titulo1, limparDescricao, lerExtras, CONVIDADOS, TEMAS, INDISPONIVEL };
     return;
   }
 
@@ -699,6 +718,7 @@
         achados.push({ nome: l.nome, busca: q.busca, origem: q.origem, rotulo: q.rotulo }); bons++;
       }
       resumoBuscas.push({ busca: q.busca, resultados: linhas.length, aceitos: bons });
+      registrar('  ' + q.busca + ': ' + linhas.length + ' resultado(s), ' + bons + ' servem');
       await humano();
     }
     ultimaDeteccao.buscas = resumoBuscas;
@@ -840,7 +860,7 @@
   async function resumoWikipedia(nome) {
     const chave = 'wiki:' + norm(nome);
     const cache = GM_getValue(chave, null);
-    if (cache !== null) return cache;
+    if (cache !== null) return ehPessoa(cache) ? cache : '';
     const base = 'https://pt.wikipedia.org/w/api.php?action=query&format=json&redirects=1&prop=extracts&exintro=1&explaintext=1&exchars=600&titles=';
     const extrato = async titulo => {
       const j = await pedirJSON(base + encodeURIComponent(titulo));
@@ -853,6 +873,9 @@
       const achado = (j?.query?.search || []).find(r => tem(r.title, norm(nome)));
       if (achado) texto = await extrato(achado.title);
     }
+    // só vale se a página for de uma PESSOA (ano de nascimento entre parênteses ou "é um(a) ... brasileiro(a)").
+    // Evita xará: "Rubão" na Wikipédia é uma música, não o convidado.
+    if (texto && !ehPessoa(texto)) texto = '';
     GM_setValue(chave, texto || '');
     return texto || '';
   }
@@ -989,35 +1012,35 @@
   function mostrarDeteccao() {
     const d = ultimaDeteccao, box = limpar(document.getElementById('pf-det'));
     box.style.display = 'block';
-    box.append(
+    box.append(...[
       el('h4', {}, 'O que eu entendi do vídeo'),
       d.citados && d.citados.length ? el('div', {}, el('b', {}, 'Citado no corte: '), ...etiquetas(d.citados)) : null,
       el('div', {}, el('b', {}, 'Convidado: '), ...(d.convidados.length ? etiquetas(d.convidados) : [el('i', {}, 'não identificado')])),
       el('div', {}, el('b', {}, 'Assunto: '), ...(d.temas.length ? etiquetas(d.temas) : [el('i', {}, 'não identificado (uso o padrão do canal)')])),
       d.tituloEpisodio ? cinza('Episódio completo: ' + d.tituloEpisodio) : null,
-      ...Object.entries(d.wiki || {}).map(([k, v]) => cinza('Wikipédia (' + k + '): ' + v.slice(0, 140) + '…')));
+      ...Object.entries(d.wiki || {}).map(([k, v]) => cinza('Wikipédia (' + k + '): ' + v.slice(0, 140) + '…'))].filter(Boolean));
   }
 
   function mostrarConferencia(total, marcados, pouco) {
     const box = limpar(document.getElementById('pf-conf'));
     box.style.display = 'block';
-    box.append(
+    box.append(...[
       el('h4', {}, '⏸ Parada 1 — confira os produtos'),
       el('div', { class: pouco ? 'pf-alerta' : 'pf-ok' }, el('b', {}, (total ?? '?') + ' produto(s) marcado(s)'),
         pouco ? ' — abaixo do mínimo de ' + cfg.minimo + '. Você pode marcar mais à mão na janela do Studio.' : ''),
       el('ol', { id: 'pf-lista' }, ...marcados.map(p => el('li', {}, p.nome + ' ', el('span', { style: 'color:#888' }, '(' + p.rotulo + ')')))),
-      el('div', { style: 'color:#aaa;margin-top:6px' }, 'Olhe a janela "Marcar produtos". Tire (botão do produto) ou acrescente à mão o que quiser. Quando estiver tudo certo:'));
+      el('div', { style: 'color:#aaa;margin-top:6px' }, 'Olhe a janela "Marcar produtos". Tire (botão do produto) ou acrescente à mão o que quiser. Quando estiver tudo certo:')].filter(Boolean));
     acoes(btn('✔ Está certo — marcar os tempos', () => rodar(etapaTempos)), btn('Parar aqui', () => { etapa = 'inicio'; acoesInicio(); status('Parado. Nada mais será feito.'); }, 'sec'));
   }
 
   function mostrarFinal() {
     const box = limpar(document.getElementById('pf-conf'));
     box.style.display = 'block';
-    box.append(
+    box.append(...[
       el('h4', {}, '⏸ Parada 2 — confira os tempos'),
       el('div', { class: 'pf-ok' }, 'Os tempos foram colocados. ', el('b', {}, 'Confira na janela do Studio'), ' e, se estiver tudo certo, clique em ', el('b', {}, '"Pronto"'), '.', el('br'),
         'Em vídeo já publicado, depois clique também em ', el('b', {}, '"Salvar"'), ' no alto da página.'),
-      el('div', { style: 'color:#aaa;margin-top:6px' }, 'O script não clica em Pronto, Salvar nem Publicar.'));
+      el('div', { style: 'color:#aaa;margin-top:6px' }, 'O script não clica em Pronto, Salvar nem Publicar.')].filter(Boolean));
     acoes(btn('Fechar / novo vídeo', () => { etapa = 'inicio'; acoesInicio(); status('Pronto para o próximo vídeo.'); }, 'sec'));
   }
 
