@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Produtos Flow — marcar produtos no YouTube Studio
 // @namespace    produtos-flow.cortes
-// @version      1.2.1
+// @version      1.3.0
 // @description  Escolhe produtos ligados ao convidado e ao assunto do corte, marca no Studio, distribui os tempos e PARA para conferência humana. Não salva nada sozinho. Sem IA.
 // @match        https://studio.youtube.com/*
 // @grant        GM_xmlhttpRequest
@@ -32,7 +32,7 @@
 
 (function () {
   'use strict';
-  const VERSAO = '1.2.1';
+  const VERSAO = '1.3.0';
 
   // ====================================================================================
   //  LISTAS — para acrescentar convidado ou tema, copie um bloco e troque os textos.
@@ -729,19 +729,27 @@
   }
 
   // ---------- etapa 2: tempos ----------
+  // Linhas do editor de tempos. No Studio de verdade, depois de adicionar um tempo o botão "+"
+  // fica desativado com o texto "Marcação de tempo já adicionada", e o horário nem sempre aparece
+  // escrito na linha — por isso "marcado" olha as três coisas.
   function linhasDeTempo(painel) {
-    const botoes = todos('#add-timestamp-button', painel).filter(visivel);
+    const botoes = [...new Set(todos('#add-timestamp-button', painel))].filter(b => b.isConnected);
+    const seg = s => s.split(':').reduce((n, p) => n * 60 + Number(p), 0);
     return botoes.map((add, i) => {
       let escopo = null;
       for (let s = pai(add); s && s !== painel && dentro(painel, s); s = pai(s)) {
-        if (todos('#add-timestamp-button', s).filter(visivel).length !== 1) break;
+        if (todos('#add-timestamp-button', s).length !== 1) break;
         escopo = s;
       }
-      const texto = ((escopo || add).innerText || '').replace(/\s+/g, ' ').trim();
+      const bruto = ((escopo || add).innerText || (escopo || add).textContent || '');
+      const linhasTxt = bruto.split(/\n+/).map(x => x.trim()).filter(Boolean);
+      const nome = (linhasTxt.find(x => !/^\+$/.test(x) && !/^\d+:\d{2}/.test(x)) || '').replace(/\s*\+$/, '').slice(0, 140);
+      const texto = bruto.replace(/\s+/g, ' ');
       const m = [...texto.matchAll(/(\d+:\d{2}(?::\d{2})?)\s*[-–]\s*(\d+:\d{2}(?::\d{2})?)/g)];
-      const seg = s => s.split(':').reduce((n, p) => n * 60 + Number(p), 0);
-      const nome = texto.replace(/(\d+:\d{2}(?::\d{2})?)\s*[-–]\s*(\d+:\d{2}(?::\d{2})?)/g, '').trim().slice(0, 120);
-      return { i, add, escopo, nome, intervalo: m.length ? { inicio: seg(m[0][1]), fim: seg(m[0][2]) } : null };
+      const rotulo = (add.getAttribute('aria-label') || add.getAttribute('title') || '');
+      const intervalo = m.length ? { inicio: seg(m[0][1]), fim: seg(m[0][2]) } : null;
+      const marcado = !!intervalo || /j[aá] adicionad/i.test(rotulo) || !habilitado(add);
+      return { i, add, escopo, nome, intervalo, marcado };
     });
   }
 
@@ -774,16 +782,23 @@
     if (!Number.isFinite(duracao)) throw Error('Não consegui ler a duração do vídeo no editor de tempos.');
     for (const v of todos('video', painel)) try { v.pause(); } catch {}
 
-    const semTempo = linhas.filter(l => !l.intervalo);
-    if (!semTempo.length) { etapa = 'conferir-tempos'; registrar('Todos os produtos já têm tempo.'); mostrarFinal(); return; }
-    if (semTempo.length !== linhas.length) throw Error('Alguns produtos já têm tempo e outros não. Para não bagunçar, ajuste à mão ou apague os tempos e rode de novo.');
+    // plano fixo: mesma duração e mesma quantidade dão sempre os mesmos horários,
+    // então dá para continuar de onde parou (linhas já marcadas são puladas).
+    const nomes = linhas.map(l => l.nome);
+    const porNome = new Set(nomes).size === nomes.length && nomes.every(Boolean);
+    const acharLinha = (k) => { const ls = linhasDeTempo(painel); return porNome ? ls.find(l => l.nome === nomes[k]) : ls[k]; };
+    if (linhas.every(l => l.marcado)) { etapa = 'conferir-tempos'; registrar('Todos os produtos já têm tempo.'); mostrarFinal(); return; }
     const plano = planoDeTempos(duracao, linhas.length);
-    registrar('Duração ' + mmss(duracao) + ' — ' + linhas.length + ' tempos planejados.');
+    const jaTinham = linhas.filter(l => l.marcado).length;
+    registrar('Duração ' + mmss(duracao) + ' — ' + linhas.length + ' tempos planejados' + (jaTinham ? ' (' + jaTinham + ' já tinham tempo, vou pular)' : '') + '.');
 
     // de trás para frente: o Studio corta um intervalo novo no começo do próximo
     for (let k = plano.length - 1; k >= 0; k--) {
       if (parar) throw Error('Parado por você.');
       const passo = plano[k];
+      let linha = acharLinha(k);
+      if (!linha) throw Error('Não achei mais a linha do produto ' + (k + 1) + ' (' + (nomes[k] || '?') + ').');
+      if (linha.marcado) { registrar('Já tinha tempo, pulei: ' + linha.nome.slice(0, 60)); continue; }
       const valor = Math.floor(passo.inicio / 60) + ':' + String(passo.inicio % 60).padStart(2, '0') + ':00';
       cursor.focus();
       Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(cursor, valor);
@@ -798,16 +813,16 @@
         if (!cabeca) { posicionou = true; break; }
       }
       if (!posicionou) throw Error('O Studio não moveu o cursor para ' + mmss(passo.inicio) + '. Nenhum tempo foi colocado nesse ponto.');
-      const linha = linhasDeTempo(painel)[passo.indice];
-      if (!linha || linha.intervalo) throw Error('A linha do produto ' + (passo.indice + 1) + ' mudou durante a operação.');
-      if (!habilitado(linha.add)) throw Error('O botão de adicionar tempo está desativado para: ' + linha.nome);
+      linha = acharLinha(k);
+      if (!linha || linha.marcado) throw Error('A linha do produto ' + (k + 1) + ' mudou durante a operação.');
       linha.add.scrollIntoView({ block: 'center' });
       await humano();
       linha.add.click();
       let feito = null;
-      for (let i = 0; i < 35; i++) { await espera(100); feito = linhasDeTempo(painel)[passo.indice]?.intervalo; if (feito) break; }
+      for (let i = 0; i < 40; i++) { await espera(100); const l = acharLinha(k); if (l && l.marcado) { feito = l; break; } }
       if (!feito) throw Error('O Studio não confirmou o tempo de: ' + linha.nome + '. Não repeti o clique.');
-      registrar('Tempo ' + (passo.indice + 1) + ': ' + mmss(feito.inicio) + '–' + mmss(feito.fim) + ' — ' + linha.nome.slice(0, 60));
+      const iv = feito.intervalo;
+      registrar('Tempo ' + (k + 1) + ': ' + (iv ? mmss(iv.inicio) + '–' + mmss(iv.fim) : 'a partir de ' + mmss(passo.inicio)) + ' — ' + linha.nome.slice(0, 60));
     }
     etapa = 'conferir-tempos';
     registrar('PARADA PARA CONFERÊNCIA: tempos colocados. Confira e clique em "Pronto" no Studio.');
