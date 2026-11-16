@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Produtos Flow — marcar produtos no YouTube Studio
 // @namespace    produtos-flow.cortes
-// @version      1.4.0
+// @version      1.5.0
 // @description  Escolhe produtos ligados ao convidado e ao assunto do corte, marca no Studio, distribui os tempos e PARA para conferência humana. Não salva nada sozinho. Sem IA.
 // @match        https://studio.youtube.com/*
 // @grant        GM_xmlhttpRequest
@@ -32,7 +32,7 @@
 
 (function () {
   'use strict';
-  const VERSAO = '1.4.0';
+  const VERSAO = '1.5.0';
 
   // ====================================================================================
   //  LISTAS — para acrescentar convidado ou tema, copie um bloco e troque os textos.
@@ -401,11 +401,13 @@
       for (const [txt, peso] of fontes) if (txt) pontos += Math.min(2, contar(txt, t.chaves)) * peso;
       if (textoWiki) pontos += Math.min(2, contar(textoWiki, t.chaves)); // profissão do convidado (Wikipédia)
       for (const c of convidados) if ((c.temas || []).includes(id)) pontos += 2; // assunto típico do convidado
-      if (pontos >= 1) temas.push({ id, nome: t.nome, pontos });
+      const doCorte = contar(titulo || '', t.chaves) > 0;
+      if (pontos >= 1) temas.push({ id, nome: t.nome, pontos: pontos + (doCorte ? 10 : 0), doCorte });
     }
     temas.sort((a, b) => b.pontos - a.pontos);
     // se o corte tem assunto claro, os assuntos fracos (só do episódio) ficam de fora
-    const forte = temas.filter(t => t.pontos >= 2);
+    temas.forEach(t => { if (t.doCorte) t.pontos -= 10; });
+    const forte = temas.filter(t => t.pontos >= 2 || t.doCorte);
     return { citados, convidados: convidados.slice(0, 4), temas: (forte.length ? forte : temas).slice(0, 3) };
   }
 
@@ -429,6 +431,12 @@
     for (const c of det.citados || []) {
       for (const b of c.buscas) fila.push({ busca: b, exige: [c.exige], recusa: [], origem: 'citado', rotulo: c.nome });
     }
+    // o ASSUNTO DO CORTE vem antes do convidado
+    for (const t of det.temas.filter(t => t.doCorte)) {
+      for (const [b, exige, recusa] of TEMAS[t.id].buscas) {
+        fila.push({ busca: b, exige: semLivro(exige), recusa: [...(recusa || []), ...(ehBuscaDeLivro(b) || exige.some(g => g.includes('livro')) ? RECUSA_LIVRO : [])], origem: 'tema', rotulo: t.nome });
+      }
+    }
     for (const c of det.convidados) {
       for (const b of c.extrasBuscas || []) {
         const exige = tem(b, c.apelidos[0]) ? [c.exige] : palavrasFortes(b).map(w => [w + '*']);
@@ -445,9 +453,9 @@
         fila.push({ busca: b, exige, recusa: umaPalavra(c) ? RECUSA_LIVRO : [], origem: 'convidado', rotulo: c.nome });
       }
     }
-    for (const t of det.temas) {
+    for (const t of det.temas.filter(t => !t.doCorte)) {
       for (const [b, exige, recusa] of TEMAS[t.id].buscas) {
-        fila.push({ busca: b, exige: semLivro(exige), recusa: [...(recusa || []), ...(ehBuscaDeLivro(b) || exige.some(g => g.includes('livro')) ? RECUSA_LIVRO : [])], origem: 'tema', rotulo: t.nome });
+        fila.push({ busca: b, exige: semLivro(exige), recusa: [...(recusa || []), ...(ehBuscaDeLivro(b) || exige.some(g => g.includes('livro')) ? RECUSA_LIVRO : [])], origem: 'tema-ep', rotulo: t.nome });
       }
     }
     const listaCoringa = (coringas && coringas.length ? coringas : CORINGAS_PADRAO);
@@ -483,7 +491,7 @@
     return x.slice(0, k).join(' ') === y.slice(0, k).join(' ');
   }
 
-  // Ordem: pessoa citada no corte (até 3) → convidado (até 3) → assunto → coringa.
+  // Ordem: pessoa citada no corte (até 3) → assunto do corte → convidado (até 2) → assunto do episódio → coringa.
   // Máximo 1 produto por busca (2 para o convidado) e nunca dois iguais.
   function escolher(achados, alvo) {
     const out = [], porBusca = new Map();
@@ -496,8 +504,10 @@
       }
     };
     pega(achados.filter(p => p.origem === 'citado'), Math.min(alvo, 3));
-    pega(achados.filter(p => p.origem === 'convidado'), Math.min(alvo, out.length + 3));
+    pega(achados.filter(p => p.origem === 'tema'), Math.max(1, alvo - 2)); // assunto do corte primeiro
+    pega(achados.filter(p => p.origem === 'convidado'), Math.min(alvo, out.length + 2)); // até 2 do convidado
     pega(achados.filter(p => p.origem === 'tema'), alvo);
+    pega(achados.filter(p => p.origem === 'tema-ep'), alvo);
     pega(achados.filter(p => p.origem === 'coringa'), alvo);
     return out;
   }
@@ -533,7 +543,7 @@
   };
   const listaCoringas = () => cfg.coringas.split(/\r?\n/).map(x => x.trim()).filter(Boolean);
   const log = [];
-  let ocupado = false, parar = false, etapa = 'inicio', ultimaDeteccao = null, ultimosEscolhidos = [];
+  let ocupado = false, parar = false, etapa = 'inicio', ultimaDeteccao = null, ultimosEscolhidos = [], ultimosCandidatos = [];
 
   const espera = ms => new Promise(r => setTimeout(r, ms));
   const humano = () => espera(450 + Math.random() * 500);
@@ -722,9 +732,18 @@
       await humano();
     }
     ultimaDeteccao.buscas = resumoBuscas;
-    const escolhidos = escolher(achados, faltam);
-    registrar('Achei ' + escolhidos.length + ' produto(s) que combinam. Marcando…');
+    // PRÉVIA: mostra as sugestões (as primeiras já marcadas) e espera você escolher
+    const candidatos = escolher(achados, faltam + 6);
+    ultimosCandidatos = candidatos;
+    etapa = 'previa';
+    registrar('PRÉVIA: ' + candidatos.length + ' sugestão(ões). Escolha quais marcar.');
+    mostrarSugestoes(candidatos, faltam, jaTem);
+  }
 
+  async function etapaMarcar(escolhidos, jaTem) {
+    const painel = await abrirSeletor();
+    await espera(600);
+    registrar('Marcando ' + escolhidos.length + ' produto(s)…');
     const marcados = [];
     // agrupa por busca para buscar cada termo uma vez só
     const porBusca = new Map();
@@ -971,6 +990,7 @@
         el('div', { id: 'pf-acoes' })),
       el('section', { id: 'pf-det', style: 'display:none' }),
       el('section', { id: 'pf-conf', style: 'display:none' }),
+      el('section', { id: 'pf-aviso', style: 'display:none' }),
       el('section', {},
         el('h4', {}, 'Ajustes'),
         el('label', {}, 'Quantos produtos ', alvo),
@@ -1021,6 +1041,75 @@
       ...Object.entries(d.wiki || {}).map(([k, v]) => cinza('Wikipédia (' + k + '): ' + v.slice(0, 140) + '…'))].filter(Boolean));
   }
 
+  const ROTULO_ORIGEM = { citado: 'citado no corte', tema: 'assunto do corte', convidado: 'convidado', 'tema-ep': 'assunto do episódio', coringa: 'coringa' };
+
+  function mostrarSugestoes(candidatos, faltam, jaTem) {
+    const box = limpar(document.getElementById('pf-conf'));
+    box.style.display = 'block';
+    const caixas = candidatos.map((p, i) => {
+      const c = el('input', { type: 'checkbox' }); c.checked = i < faltam;
+      return { p, c };
+    });
+    const contador = el('b', {}, '');
+    const atualizar = () => { contador.textContent = caixas.filter(x => x.c.checked).length + ' escolhido(s)'; };
+    caixas.forEach(x => x.c.onchange = atualizar); atualizar();
+    box.append(...[
+      el('h4', {}, '👀 Prévia — escolha os produtos'),
+      candidatos.length ? null : el('div', { class: 'pf-alerta' }, 'Não achei nenhum produto que combine. Use os itens coringa (Ajustes) ou marque à mão.'),
+      el('div', { style: 'color:#aaa;margin-bottom:4px' }, 'Nada foi marcado ainda. Desmarque o que não combina e marque os extras que quiser. ', contador),
+      el('div', { style: 'max-height:260px;overflow:auto' }, ...caixas.map(({ p, c }) =>
+        el('label', { style: 'display:flex;gap:6px;align-items:flex-start;margin:3px 0' }, c,
+          el('span', {}, p.nome, el('br'), el('span', { style: 'color:#888;font-size:11px' }, ROTULO_ORIGEM[p.origem] + ' · busca "' + p.busca + '"')))))].filter(Boolean));
+    acoes(btn('✔ Marcar os escolhidos', () => {
+      const lista = caixas.filter(x => x.c.checked).map(x => x.p);
+      if (!lista.length) { status('Escolha pelo menos um produto.'); return; }
+      rodar(() => etapaMarcar(lista, jaTem));
+    }), btn('Cancelar', () => { etapa = 'inicio'; acoesInicio(); status('Cancelado. Nada foi marcado.'); }, 'sec'), btnAvisar());
+  }
+
+  // Botão de avisar: abre um relatório no GitHub do script (o Claude lê de lá) e copia o relatório completo.
+  const btnAvisar = () => btn('📨 Avisar o Claude do que ficou errado', abrirAviso, 'sec');
+  function abrirAviso() {
+    const box = document.getElementById('pf-aviso'); limpar(box); box.style.display = 'block';
+    const lista = (ultimosEscolhidos.length ? ultimosEscolhidos : ultimosCandidatos).slice(0, 16);
+    const caixas = lista.map(p => ({ p, c: el('input', { type: 'checkbox' }) }));
+    const texto = el('textarea', { placeholder: 'Ex.: o assunto era STF e veio livro de economia; faltou produto do convidado…' });
+    box.append(...[
+      el('h4', {}, '📨 O que ficou errado?'),
+      texto,
+      lista.length ? el('div', { style: 'color:#aaa;margin:6px 0 2px' }, 'Marque os produtos que NÃO combinam:') : null,
+      ...caixas.map(({ p, c }) => el('label', { style: 'display:flex;gap:6px;margin:2px 0' }, c, el('span', {}, p.nome))),
+      el('div', { style: 'color:#aaa;margin-top:6px' }, 'Abre uma página do GitHub já preenchida: é só clicar em "Create" / "Submit new issue". Depois diga ao Claude: "olha os avisos".'),
+      btn('Enviar aviso (abre o GitHub)', () => {
+        const errados = caixas.filter(x => x.c.checked).map(x => x.p);
+        enviarAviso(texto.value.trim(), errados);
+      }),
+      btn('Fechar', () => { box.style.display = 'none'; }, 'sec')].filter(Boolean));
+  }
+  function enviarAviso(texto, errados) {
+    const d = ultimaDeteccao || {};
+    const linhas = [
+      '**O que ficou errado:** ' + (texto || '(sem comentário)'),
+      '',
+      errados.length ? '**Produtos que não combinam:**\n' + errados.map(p => '- ' + p.nome + ' _(busca "' + p.busca + '", ' + (ROTULO_ORIGEM[p.origem] || p.origem) + ')_').join('\n') : '',
+      '',
+      '**Vídeo:** ' + (d.titulo || '?'),
+      '**Episódio:** ' + (d.tituloEpisodio || '?'),
+      '**Entendeu:** citado ' + ((d.citados || []).join(', ') || '—') + ' | convidado ' + ((d.convidados || []).join(', ') || '—') + ' | assunto ' + ((d.temas || []).join(', ') || '—'),
+      '**Marcados:** ' + (ultimosEscolhidos.map(p => p.nome).join(' · ') || '—'),
+      '**Buscas:** ' + ((d.buscas || []).map(b => b.busca + ' ' + b.aceitos + '/' + b.resultados).join(' · ') || '—'),
+      '**Versão:** ' + VERSAO + ' · etapa ' + etapa,
+      '',
+      '<details><summary>Registro</summary>\n\n```\n' + log.slice(-50).map(x => x.t + ' ' + x.msg).join('\n') + '\n```\n</details>',
+    ];
+    let corpo = linhas.join('\n');
+    if (corpo.length > 6000) corpo = corpo.slice(0, 6000) + '\n…(cortado)';
+    const tituloAviso = 'Aviso: ' + (d.titulo || 'vídeo').slice(0, 70);
+    try { GM_setClipboard('RELATÓRIO PRODUTOS FLOW\n' + corpo, 'text'); } catch {}
+    window.open('https://github.com/erikbrasil/produtos-flow/issues/new?title=' + encodeURIComponent(tituloAviso) + '&body=' + encodeURIComponent(corpo), '_blank');
+    status('Abri o aviso no GitHub (e copiei o relatório). Clique em "Create" lá.');
+  }
+
   function mostrarConferencia(total, marcados, pouco) {
     const box = limpar(document.getElementById('pf-conf'));
     box.style.display = 'block';
@@ -1030,7 +1119,7 @@
         pouco ? ' — abaixo do mínimo de ' + cfg.minimo + '. Você pode marcar mais à mão na janela do Studio.' : ''),
       el('ol', { id: 'pf-lista' }, ...marcados.map(p => el('li', {}, p.nome + ' ', el('span', { style: 'color:#888' }, '(' + p.rotulo + ')')))),
       el('div', { style: 'color:#aaa;margin-top:6px' }, 'Olhe a janela "Marcar produtos". Tire (botão do produto) ou acrescente à mão o que quiser. Quando estiver tudo certo:')].filter(Boolean));
-    acoes(btn('✔ Está certo — marcar os tempos', () => rodar(etapaTempos)), btn('Parar aqui', () => { etapa = 'inicio'; acoesInicio(); status('Parado. Nada mais será feito.'); }, 'sec'));
+    acoes(btn('✔ Está certo — marcar os tempos', () => rodar(etapaTempos)), btn('Parar aqui', () => { etapa = 'inicio'; acoesInicio(); status('Parado. Nada mais será feito.'); }, 'sec'), btnAvisar());
   }
 
   function mostrarFinal() {
@@ -1041,7 +1130,7 @@
       el('div', { class: 'pf-ok' }, 'Os tempos foram colocados. ', el('b', {}, 'Confira na janela do Studio'), ' e, se estiver tudo certo, clique em ', el('b', {}, '"Pronto"'), '.', el('br'),
         'Em vídeo já publicado, depois clique também em ', el('b', {}, '"Salvar"'), ' no alto da página.'),
       el('div', { style: 'color:#aaa;margin-top:6px' }, 'O script não clica em Pronto, Salvar nem Publicar.')].filter(Boolean));
-    acoes(btn('Fechar / novo vídeo', () => { etapa = 'inicio'; acoesInicio(); status('Pronto para o próximo vídeo.'); }, 'sec'));
+    acoes(btn('Fechar / novo vídeo', () => { etapa = 'inicio'; acoesInicio(); status('Pronto para o próximo vídeo.'); }, 'sec'), btnAvisar());
   }
 
   async function rodar(fn) {
@@ -1053,7 +1142,7 @@
       const box = document.getElementById('pf-conf');
       box.style.display = 'block';
       limpar(box).append(el('div', { class: 'pf-alerta' }, el('b', {}, 'Deu erro: '), e.message, el('br'), 'Clique em "Copiar relatório" e cole na conversa com o Claude.'));
-      acoes(btn('▶ Começar de novo', () => rodar(etapaProdutos)), ...(etapa === 'conferir-produtos' ? [btn('Tentar só os tempos', () => rodar(etapaTempos), 'sec')] : []));
+      acoes(btnAvisar(), btn('▶ Começar de novo', () => rodar(etapaProdutos)), ...(etapa === 'conferir-produtos' ? [btn('Tentar só os tempos', () => rodar(etapaTempos), 'sec')] : []));
     } finally { ocupado = false; }
   }
 
