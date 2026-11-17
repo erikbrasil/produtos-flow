@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Produtos Flow — marcar produtos no YouTube Studio
 // @namespace    produtos-flow.cortes
-// @version      1.9.0
+// @version      1.10.0
 // @description  Escolhe produtos ligados ao convidado e ao assunto do corte, marca no Studio, distribui os tempos e PARA para conferência humana. Não salva nada sozinho. Sem IA.
 // @match        https://studio.youtube.com/*
 // @grant        GM_xmlhttpRequest
@@ -32,7 +32,7 @@
 
 (function () {
   'use strict';
-  const VERSAO = '1.9.0';
+  const VERSAO = '1.10.0';
 
   // ====================================================================================
   //  LISTAS — para acrescentar convidado ou tema, copie um bloco e troque os textos.
@@ -146,6 +146,18 @@
         ['Livro TDAH', [['livro'], ['tdah', 'deficit']]],
         ['Livro autismo', [['livro'], ['autis*']]],
         ['Fidget toy', [['fidget', 'anti estresse', 'antiestresse']]],
+      ],
+    },
+    'comportamento': {
+      nome: 'Comportamento / Autoajuda',
+      chaves: ['vicio*', 'viciad*', 'dopamina', 'felicidade', 'feliz', 'infeliz', 'habito*', 'disciplina', 'motivacao', 'produtividade', 'proposito', 'autoestima', 'relacionamento*', 'namoro', 'casamento', 'solidao', 'celular', 'redes sociais', 'pornografia', 'procrastina*', 'mentalidade', 'comportamento*', 'cerebro'],
+      buscas: [
+        ['Livro Nação Dopamina', [['dopamina']]],
+        ['Hábitos Atômicos', [['habitos atomicos']]],
+        ['O Poder do Hábito', [['poder do habito']]],
+        ['Livro felicidade', [['livro'], ['felicidade', 'feliz']]],
+        ['Livro disciplina', [['livro'], ['disciplina', 'autodisciplina']]],
+        ['Livro inteligência emocional', [['inteligencia emocional']]],
       ],
     },
     'comedia': {
@@ -480,7 +492,8 @@
     'esclarece tudo sobre igor flow podcast monark convidado convidada episodio corte cortes ao aos esta estao seria sera eram foram ' +
     'tras partir pouca pouco poucos poucas conhece conhecem conhecer fica ficou ficar deu dar vem veio vira virou sai saiu chega chegou manda mandou ' +
     'entra entrou mostra mostrou mudou muda mudar acabou acaba cuidado atencao urgente exclusivo completo inteiro sabe sabem quanto quanta ' +
-    'assim entao enquanto lugar forma maneira certo errado errou acertou erraram acertaram ficaram mundo pessoas pessoa parece parecer pais').split(' '));
+    'assim entao enquanto lugar forma maneira certo errado errou acertou erraram acertaram ficaram mundo pessoas pessoa parece parecer pais ' +
+    'estranho estranha estranhos simples facil dificil unico unica deixa deixou deixar perigoso perigosa importante serio seria assustador triste engracado').split(' '));
   const CURTAS_VALEM = new Set(['6x1', 'stf', 'pcc', 'eua', 'ufc', 'gta', 'ps5', 'f1', 'ia', 'pix', 'mbl', 'tse', 'clt', 'inss', 'sus', 'otan']);
   function palavrasDoTitulo(titulo, ignorar = []) {
     const fora = new Set(ignorar.filter(Boolean));
@@ -512,6 +525,14 @@
 
   function planoDeBuscas(det, coringas) {
     const fila = [];
+    // o que a pessoa digitou em "Assunto do corte" vem antes de tudo
+    for (const d of det.dicas || []) {
+      const fortes = palavrasFortes(d);
+      if (!fortes.length) continue;
+      const ex = fortes.map(w => [w.length > 4 ? w.slice(0, w.length - 1) + '*' : w]);
+      fila.push({ busca: 'livro ' + d, exige: ex, recusa: RECUSA_LIVRO, origem: 'citado', rotulo: 'assunto digitado' });
+      fila.push({ busca: d, exige: ex, recusa: ['adesivo', 'capinha', 'case', 'pelicula'], origem: 'citado', rotulo: 'assunto digitado' });
+    }
     const chavesAssunto = det.temas.flatMap(t => TEMAS[t.id].chaves);
     for (const c of det.citados || []) {
       for (const b of c.buscas) fila.push({ busca: b, exige: [c.exige], recusa: [], origem: 'citado', rotulo: c.nome });
@@ -595,7 +616,8 @@
         out.push(p); porBusca.set(p.busca, (porBusca.get(p.busca) || 0) + 1);
       }
     };
-    pega(achados.filter(p => p.origem === 'citado'), Math.min(alvo, 3));
+    pega(achados.filter(p => p.origem === 'citado' && p.rotulo === 'assunto digitado'), alvo);
+    pega(achados.filter(p => p.origem === 'citado'), Math.min(alvo, out.length + 3));
     pega(achados.filter(p => p.origem === 'tema'), alvo);      // assunto do corte primeiro
     pega(achados.filter(p => p.origem === 'titulo'), alvo);    // palavras do título do corte
     pega(achados.filter(p => p.origem === 'tema-ep'), alvo);   // assunto do episódio
@@ -648,6 +670,7 @@
     maximo: Number(GM_getValue('maximo', 10)) || 10,
     minimo: Number(GM_getValue('minimo', 5)) || 5,
     extras: String(GM_getValue('extras', '')),
+    dica: '',
     coringas: String(GM_getValue('coringas', CORINGAS_PADRAO.join('\n'))),
   };
   const listaCoringas = () => cfg.coringas.split(/\r?\n/).map(x => x.trim()).filter(Boolean);
@@ -847,7 +870,11 @@
       const resumo = await resumoWikipedia(c.nome).catch(e => { registrar('Wikipédia sem resposta para ' + c.nome + ': ' + e.message); return ''; });
       if (resumo) { wiki[c.nome] = resumo; registrar('Wikipédia: ' + c.nome + ' — ' + resumo.slice(0, 110) + '…'); }
     }
-    const det = detectar({ titulo, descricao, tags, tituloEpisodio, extras: cfg.extras, wiki, transcricao });
+    const dicas = cfg.dica.split(/[,;\n]+/).map(x => x.trim()).filter(Boolean);
+    const tituloComDica = dicas.length ? titulo + ' | ' + dicas.join(' ') : titulo;
+    if (dicas.length) registrar('Assunto digitado: ' + dicas.join(', '));
+    const det = detectar({ titulo: tituloComDica, descricao, tags, tituloEpisodio, extras: cfg.extras, wiki, transcricao });
+    det.dicas = dicas;
     if (det.fala && det.fala.length) registrar('Mais falado no corte: ' + det.fala.join(', '));
     ultimaDeteccao = { fala: det.fala || [], palavras: det.palavras || [], titulo, tituloEpisodio, idEpisodio: idEp, tags: tags.slice(0, 15), citados: (det.citados || []).map(c => c.nome), convidados: det.convidados.map(c => c.nome + (c.desconhecido ? ' (do episódio)' : '')), temas: det.temas.map(t => t.nome + ' (' + t.pontos + ')'), wiki: Object.fromEntries(Object.entries(wiki).map(([k, v]) => [k, v.slice(0, 160)])) };
     registrar('Citado no corte: ' + ((det.citados || []).map(c => c.nome).join(', ') || '—') + ' | Convidado: ' + (det.convidados.map(c => c.nome).join(', ') || 'não identificado') + ' | Assunto: ' + (det.temas.map(t => t.nome).join(', ') || 'não identificado'));
@@ -1074,8 +1101,9 @@
     return t;
   }
 
-  // LEGENDA AUTOMÁTICA do vídeo (para descobrir o assunto pela fala). Dois jeitos:
-  // 1) a faixa de legenda que a página do vídeo indica; 2) o painel "Mostrar transcrição".
+  // LEGENDA AUTOMÁTICA do vídeo (para descobrir o assunto pela fala): a faixa pública de legenda
+  // que a página do vídeo indica. Em 11/2026 o YouTube devolve essa faixa vazia para scripts na
+  // maioria dos vídeos; quando vier vazia, o script segue pelo título e pelo campo "Assunto".
   function pedirTexto(url, opcoes = {}) {
     return new Promise((ok, erro) => GM_xmlhttpRequest({
       method: opcoes.method || 'GET', url, timeout: 12000, headers: opcoes.headers, data: opcoes.data,
@@ -1116,24 +1144,7 @@
         if (texto) metodo = 'faixa de legenda (' + (faixa.languageCode || '?') + (faixa.kind === 'asr' ? ', automática' : '') + ')';
       } catch {}
     }
-    // 2) painel "Mostrar transcrição"
-    if (!texto) {
-      const params = (html.match(/"getTranscriptEndpoint":\{"params":"([^"]+)"/) || [])[1];
-      const chave = (html.match(/"INNERTUBE_API_KEY":"([^"]+)"/) || [])[1];
-      const versao = (html.match(/"INNERTUBE_CLIENT_VERSION":"([^"]+)"/) || [])[1] || '2.20261101.00.00';
-      if (params) {
-        const r = await pedirTexto('https://www.youtube.com/youtubei/v1/get_transcript' + (chave ? '?key=' + chave : ''), {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          data: JSON.stringify({ context: { client: { clientName: 'WEB', clientVersion: versao, hl: 'pt', gl: 'BR' } }, params }),
-        });
-        try {
-          const j = JSON.parse(r.texto || '{}');
-          texto = coletar(j, 'transcriptSegmentRenderer').map(seg => (seg.snippet?.runs || []).map(x => x.text).join('')).join(' ').replace(/\s+/g, ' ').trim();
-          if (texto) metodo = 'painel de transcrição';
-        } catch {}
-      }
-    }
-    if (!texto) throw Error(faixas.length ? 'a legenda existe mas o YouTube não entregou o texto' : 'o vídeo ainda não tem legenda (página ' + pagina.status + ')');
+    if (!texto) throw Error(faixas.length ? 'o YouTube não libera o texto da legenda para scripts' : 'o vídeo ainda não tem legenda (página ' + pagina.status + ')');
     GM_setValue('fala:' + id, texto.slice(0, 60000));
     return { texto, metodo };
   }
@@ -1207,6 +1218,8 @@
     const fechar = el('button', { class: 'pf sec', id: 'pf-fechar', style: 'margin:0' }, '✕');
     const alvo = el('input', { type: 'number', id: 'pf-alvo', min: '1', max: '30' }); alvo.value = cfg.alvo;
     const autoCx = el('input', { type: 'checkbox', id: 'pf-auto' }); autoCx.checked = cfg.auto;
+    const dica = el('input', { type: 'text', id: 'pf-dica', placeholder: 'palavras separadas por vírgula', style: 'width:100%;background:#111;color:#eee;border:1px solid #444;border-radius:6px;padding:4px;margin-top:3px' });
+    dica.oninput = () => { cfg.dica = dica.value; };
     const maximo = el('input', { type: 'number', id: 'pf-max', min: '1', max: '30' }); maximo.value = cfg.maximo;
     const minimo = el('input', { type: 'number', id: 'pf-min', min: '1', max: '30' }); minimo.value = cfg.minimo;
     const extras = el('textarea', { id: 'pf-extras' }); extras.value = cfg.extras;
@@ -1218,6 +1231,8 @@
       el('header', {}, el('span', {}, '🛒 Produtos Flow ', el('small', {}, 'v' + VERSAO)), fechar),
       el('section', {},
         el('div', { id: 'pf-status' }, 'Abra o vídeo (detalhes) ou o rascunho e clique em Começar.'),
+        el('label', { style: 'display:block;margin-top:8px' }, 'Assunto do corte (opcional): ', dica),
+        el('div', { style: 'color:#888;font-size:11px' }, 'Ex.: vício, felicidade · STF · drift, Japão. Vem antes de tudo na busca.'),
         el('div', { id: 'pf-acoes' })),
       el('section', { id: 'pf-det', style: 'display:none' }),
       el('section', { id: 'pf-conf', style: 'display:none' }),
@@ -1368,7 +1383,7 @@
       el('div', { class: 'pf-ok' }, 'Os tempos foram colocados. ', el('b', {}, 'Confira na janela do Studio'), ' e, se estiver tudo certo, clique em ', el('b', {}, '"Pronto"'), '.', el('br'),
         'Em vídeo já publicado, depois clique também em ', el('b', {}, '"Salvar"'), ' no alto da página.'),
       el('div', { style: 'color:#aaa;margin-top:6px' }, 'O script não clica em Pronto, Salvar nem Publicar.')].filter(Boolean));
-    acoes(btn('Fechar / novo vídeo', () => { etapa = 'inicio'; acoesInicio(); status('Pronto para o próximo vídeo.'); }, 'sec'), btnAvisar());
+    acoes(btn('Fechar / novo vídeo', () => { etapa = 'inicio'; cfg.dica = ''; const d = document.getElementById('pf-dica'); if (d) d.value = ''; acoesInicio(); status('Pronto para o próximo vídeo.'); }, 'sec'), btnAvisar());
   }
 
   async function rodar(fn) {
