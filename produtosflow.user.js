@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Produtos Flow — marcar produtos no YouTube Studio
 // @namespace    produtos-flow.cortes
-// @version      1.6.0
+// @version      1.8.0
 // @description  Escolhe produtos ligados ao convidado e ao assunto do corte, marca no Studio, distribui os tempos e PARA para conferência humana. Não salva nada sozinho. Sem IA.
 // @match        https://studio.youtube.com/*
 // @grant        GM_xmlhttpRequest
@@ -32,7 +32,7 @@
 
 (function () {
   'use strict';
-  const VERSAO = '1.6.0';
+  const VERSAO = '1.8.0';
 
   // ====================================================================================
   //  LISTAS — para acrescentar convidado ou tema, copie um bloco e troque os textos.
@@ -408,7 +408,40 @@
     // se o corte tem assunto claro, os assuntos fracos (só do episódio) ficam de fora
     temas.forEach(t => { if (t.doCorte) t.pontos -= 10; });
     const forte = temas.filter(t => t.pontos >= 2 || t.doCorte);
-    return { citados, convidados: convidados.slice(0, 4), temas: (forte.length ? forte : temas).slice(0, 3) };
+    const nomesConv = convidados.flatMap(c => [...(c.apelidos || []), norm(c.nome)]).join(' ').split(' ');
+    const nomesCit = citados.flatMap(c => c.apelidos).join(' ').split(' ');
+    return { citados, convidados: convidados.slice(0, 4), temas: (forte.length ? forte : temas).slice(0, 3), palavras: palavrasDoTitulo(titulo, [...nomesConv, ...nomesCit]).filter(w => !(forte.length ? forte : temas).some(t => temAlgum(w, TEMAS[t.id].chaves))) };
+  }
+
+  // Palavras "de assunto" do título do corte: tira artigos, verbos de chamada ("revela", "quebrou"),
+  // adjetivos de clique ("obscura", "bizarro"), risadas e nomes de pessoas. O que sobra vira busca.
+  const VAZIAS = new Set(('a o os as e e de da do das dos em no na nos nas num numa um uma uns umas que com sem por para pra pro pros sobre ' +
+    'ser foi era sao tem ter vai vao ja muito muita mais menos como quando onde porque qual quais quem esse essa esses essas isso este esta isto ' +
+    'aquele aquela ele ela eles elas voce voces vc seu sua seus suas meu minha nosso nossa nao sim so tudo nada todo toda todos todas aqui ali la ' +
+    'agora hoje ontem depois antes ate entre contra desde cada outro outra mesmo mesma ainda tambem sempre nunca vez vezes coisa coisas gente cara ' +
+    'verdade verdadeiro verdadeira obscura obscuro obscuras obscuros real reais realmente sincero sincera sinceridade quebrou quebra quebrado ' +
+    'perdeu perdendo perde cabeca paciencia bizarro bizarra bizarros pior piores melhor melhores maior maiores menor grande grandes pequeno ' +
+    'incrivel absurdo absurda louco louca loucura chocante momento acontecendo aconteceu acontece explica explicou explicando fala falou falando ' +
+    'conta contou contando revela revelou desabafa desabafo analisa analise reflexao aula polemica polemico treta tretas vergonha medo comemorando ' +
+    'solta verbo abre jogo fim inicio regra regras velada segredo segredos ninguem alguem sabe saber sabia queria quer pode poder deve ' +
+    'acha acho fez faz fazer dizer disse diz pensa pensar ver viu olha historia historias caso casos tipo jeito parte vida novo nova noite dia ' +
+    'esclarece tudo sobre igor flow podcast monark convidado convidada episodio corte cortes ao aos esta estao seria sera eram foram ' +
+    'tras partir pouca pouco poucos poucas conhece conhecem conhecer fica ficou ficar deu dar vem veio vira virou sai saiu chega chegou manda mandou ' +
+    'entra entrou mostra mostrou mudou muda mudar acabou acaba cuidado atencao urgente exclusivo completo inteiro sabe sabem quanto quanta ' +
+    'assim entao enquanto lugar forma maneira certo errado errou acertou erraram acertaram ficaram mundo pessoas pessoa').split(' '));
+  const CURTAS_VALEM = new Set(['6x1', 'stf', 'pcc', 'eua', 'ufc', 'gta', 'ps5', 'f1', 'ia', 'pix', 'mbl', 'tse', 'clt', 'inss', 'sus', 'otan']);
+  function palavrasDoTitulo(titulo, ignorar = []) {
+    const fora = new Set(ignorar.filter(Boolean));
+    const vistas = new Set(), out = [];
+    for (let w of norm(titulo).split(' ')) {
+      w = w.replace(/(k)\1{2,}$/, '$1').replace(/k{2,}$/, ''); // "FIUKKKKK" -> "fiuk"
+      if (!w || vistas.has(w) || VAZIAS.has(w) || fora.has(w) || APRESENTADORES.includes(w)) continue;
+      if (/^k{2,}$|^(ha)+$|^(rs)+$/.test(w)) continue;
+      if (w.length < 4 && !CURTAS_VALEM.has(w)) continue;
+      if (/^\d+$/.test(w)) continue;
+      vistas.add(w); out.push(w);
+    }
+    return out.slice(0, 3);
   }
 
   // Monta a fila de buscas: convidado primeiro, depois assuntos, depois o padrão.
@@ -437,6 +470,18 @@
         fila.push({ busca: b, exige: semLivro(exige), recusa: [...(recusa || []), ...(ehBuscaDeLivro(b) || exige.some(g => g.includes('livro')) ? RECUSA_LIVRO : [])], origem: 'tema', rotulo: t.nome });
       }
     }
+    // palavras do título do corte (ex.: "trânsito", "lasanha", "6x1") — o assunto do corte manda
+    for (const w of det.palavras || []) {
+      const ex = [[w.length > 4 ? w.slice(0, Math.max(4, w.length - 2)) + '*' : w]];
+      fila.push({ busca: 'livro ' + w, exige: ex, recusa: RECUSA_LIVRO, origem: 'titulo', rotulo: 'título do corte' });
+      fila.push({ busca: w, exige: ex, recusa: ['adesivo', 'capinha', 'case', 'pelicula'], origem: 'titulo', rotulo: 'título do corte' });
+    }
+    for (const t of det.temas.filter(t => !t.doCorte)) {
+      for (const [b, exige, recusa] of TEMAS[t.id].buscas) {
+        fila.push({ busca: b, exige: semLivro(exige), recusa: [...(recusa || []), ...(ehBuscaDeLivro(b) || exige.some(g => g.includes('livro')) ? RECUSA_LIVRO : [])], origem: 'tema-ep', rotulo: t.nome });
+      }
+    }
+    // convidado por último (antes dos coringas): no máximo 2 produtos
     for (const c of det.convidados) {
       for (const b of c.extrasBuscas || []) {
         const exige = tem(b, c.apelidos[0]) ? [c.exige] : palavrasFortes(b).map(w => [w + '*']);
@@ -451,11 +496,6 @@
         if (!exige.length) exige = [c.exige];
         if (umaPalavra(c)) exige = [...exige, chavesAssunto];
         fila.push({ busca: b, exige, recusa: umaPalavra(c) ? RECUSA_LIVRO : [], origem: 'convidado', rotulo: c.nome });
-      }
-    }
-    for (const t of det.temas.filter(t => !t.doCorte)) {
-      for (const [b, exige, recusa] of TEMAS[t.id].buscas) {
-        fila.push({ busca: b, exige: semLivro(exige), recusa: [...(recusa || []), ...(ehBuscaDeLivro(b) || exige.some(g => g.includes('livro')) ? RECUSA_LIVRO : [])], origem: 'tema-ep', rotulo: t.nome });
       }
     }
     const listaCoringa = (coringas && coringas.length ? coringas : CORINGAS_PADRAO);
@@ -491,7 +531,7 @@
     return x.slice(0, k).join(' ') === y.slice(0, k).join(' ');
   }
 
-  // Ordem: pessoa citada no corte (até 3) → assunto do corte → convidado (até 2) → assunto do episódio → coringa.
+  // Ordem: pessoa citada no corte (até 3) → assunto do corte → palavras do título → assunto do episódio → convidado (até 2) → coringa.
   // Máximo 1 produto por busca (2 para o convidado) e nunca dois iguais.
   function escolher(achados, alvo) {
     const out = [], porBusca = new Map();
@@ -504,10 +544,10 @@
       }
     };
     pega(achados.filter(p => p.origem === 'citado'), Math.min(alvo, 3));
-    pega(achados.filter(p => p.origem === 'tema'), Math.max(1, alvo - 2)); // assunto do corte primeiro
+    pega(achados.filter(p => p.origem === 'tema'), alvo);      // assunto do corte primeiro
+    pega(achados.filter(p => p.origem === 'titulo'), alvo);    // palavras do título do corte
+    pega(achados.filter(p => p.origem === 'tema-ep'), alvo);   // assunto do episódio
     pega(achados.filter(p => p.origem === 'convidado'), Math.min(alvo, out.length + 2)); // até 2 do convidado
-    pega(achados.filter(p => p.origem === 'tema'), alvo);
-    pega(achados.filter(p => p.origem === 'tema-ep'), alvo);
     pega(achados.filter(p => p.origem === 'coringa'), alvo);
     return out;
   }
@@ -542,7 +582,7 @@
   const mmss = s => Math.floor(s / 60) + ':' + String(Math.floor(s % 60)).padStart(2, '0');
 
   if (typeof module !== 'undefined' && module.exports) {
-    module.exports = { produtosParaCobrir, cobertura, ehPessoa, repetido, CITADOS, CORINGAS_PADRAO, norm, tem, detectar, planoDeBuscas, aceita, escolher, planoDeTempos, linkEpisodio, nomeDoEpisodio, nomesDoEpisodio, titulo1, limparDescricao, lerExtras, CONVIDADOS, TEMAS, INDISPONIVEL };
+    module.exports = { palavrasDoTitulo, produtosParaCobrir, cobertura, ehPessoa, repetido, CITADOS, CORINGAS_PADRAO, norm, tem, detectar, planoDeBuscas, aceita, escolher, planoDeTempos, linkEpisodio, nomeDoEpisodio, nomesDoEpisodio, titulo1, limparDescricao, lerExtras, CONVIDADOS, TEMAS, INDISPONIVEL };
     return;
   }
 
@@ -591,6 +631,33 @@
     return umVisivel(todos('textarea,[contenteditable="true"]').filter(el => rot.test(el.getAttribute('aria-label') || '')));
   }
   const textoDe = el => !el ? '' : (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') ? el.value : el.innerText;
+
+  // Título com TESTE A/B: o campo normal pode sumir ou virar vários títulos (A, B, C).
+  // Junta todos os títulos que achar; se não achar nenhum campo, usa o nome do vídeo
+  // na barra da esquerda e, por último, o título público do vídeo (oEmbed).
+  async function lerTitulo() {
+    const visto = new Set(), titulos = [];
+    const add = t => { t = String(t || '').replace(/\s+/g, ' ').trim(); if (t && t.length > 3 && !visto.has(t)) { visto.add(t); titulos.push(t); } };
+    add(textoDe(campo('titulo')));
+    // campos de título do teste A/B ("Título 1", "Título 2", "Title A"…)
+    for (const el of todos('textarea,[contenteditable="true"],input[type="text"]')) {
+      const rot = (el.getAttribute('aria-label') || el.getAttribute('placeholder') || '');
+      if (/^(T[ií]tulo|Title)\b/i.test(rot) && visivel(el)) add(textoDe(el));
+    }
+    // cartões do teste A/B que mostram os títulos como texto
+    for (const el of todos('[id*="title" i], [class*="title" i]')) {
+      const host = el.closest && el.closest('[class*="test" i], [id*="test" i], [class*="experiment" i], [id*="experiment" i]');
+      if (host && visivel(el) && !el.children.length) add(el.textContent);
+    }
+    if (titulos.length) return titulos.join(' | ');
+    // barra da esquerda: "Seu vídeo" + nome do vídeo
+    const nome = umVisivel(todos('ytcp-navigation-drawer #entity-name, ytcp-navigation-drawer .entity-name, #entity-name, .entity-name, ytcp-video-info #video-title'));
+    if (nome) { add(nome.textContent); if (titulos.length) return titulos[0]; }
+    // título público
+    const id = (location.pathname.match(/\/video\/([A-Za-z0-9_-]{11})/) || [])[1];
+    if (id) { try { const t = await tituloOEmbed(id); if (t) return t; } catch {} }
+    return '';
+  }
   function lerTags() {
     return [...new Set(todos('ytcp-video-tags ytcp-chip, ytcp-chip-bar ytcp-chip, #chip-bar ytcp-chip').map(c => (c.innerText || c.textContent || '').trim()).filter(Boolean))].slice(0, 60);
   }
@@ -701,9 +768,10 @@
 
   // ---------- etapa 1: escolher e marcar ----------
   async function etapaProdutos() {
-    const titulo = textoDe(campo('titulo')).trim();
+    const titulo = (await lerTitulo()).trim();
     const descricao = textoDe(campo('descricao'));
-    if (!titulo) throw Error('Abra a página de detalhes do vídeo (ou o rascunho) antes de começar — não achei o título.');
+    if (!titulo) throw Error('Abra a página de detalhes do vídeo (ou o rascunho) antes de começar — não achei o título (nem no teste A/B).');
+    if (titulo.includes(' | ')) registrar('Teste A/B: usando todos os títulos — ' + titulo.slice(0, 160));
     const tags = lerTags();
     const idEp = linkEpisodio(descricao);
     let tituloEpisodio = '';
@@ -718,7 +786,7 @@
       if (resumo) { wiki[c.nome] = resumo; registrar('Wikipédia: ' + c.nome + ' — ' + resumo.slice(0, 110) + '…'); }
     }
     const det = detectar({ titulo, descricao, tags, tituloEpisodio, extras: cfg.extras, wiki });
-    ultimaDeteccao = { titulo, tituloEpisodio, idEpisodio: idEp, tags: tags.slice(0, 15), citados: (det.citados || []).map(c => c.nome), convidados: det.convidados.map(c => c.nome + (c.desconhecido ? ' (do episódio)' : '')), temas: det.temas.map(t => t.nome + ' (' + t.pontos + ')'), wiki: Object.fromEntries(Object.entries(wiki).map(([k, v]) => [k, v.slice(0, 160)])) };
+    ultimaDeteccao = { palavras: det.palavras || [], titulo, tituloEpisodio, idEpisodio: idEp, tags: tags.slice(0, 15), citados: (det.citados || []).map(c => c.nome), convidados: det.convidados.map(c => c.nome + (c.desconhecido ? ' (do episódio)' : '')), temas: det.temas.map(t => t.nome + ' (' + t.pontos + ')'), wiki: Object.fromEntries(Object.entries(wiki).map(([k, v]) => [k, v.slice(0, 160)])) };
     registrar('Citado no corte: ' + ((det.citados || []).map(c => c.nome).join(', ') || '—') + ' | Convidado: ' + (det.convidados.map(c => c.nome).join(', ') || 'não identificado') + ' | Assunto: ' + (det.temas.map(t => t.nome).join(', ') || 'não identificado'));
     mostrarDeteccao();
 
@@ -743,7 +811,7 @@
     for (const q of plano) {
       if (parar) throw Error('Parado por você.');
       // para quando já há candidatos de sobra
-      if (escolher(achados, faltam).length >= faltam && achados.length >= faltam + 3) break;
+      if (q.origem !== 'tema' && q.origem !== 'titulo' && escolher(achados, faltam).length >= faltam && achados.length >= faltam + 3) break;
       registrar('Buscando: ' + q.busca);
       const linhas = await buscar(painel, q.busca);
       let bons = 0;
@@ -1070,12 +1138,13 @@
       el('h4', {}, 'O que eu entendi do vídeo'),
       d.citados && d.citados.length ? el('div', {}, el('b', {}, 'Citado no corte: '), ...etiquetas(d.citados)) : null,
       el('div', {}, el('b', {}, 'Convidado: '), ...(d.convidados.length ? etiquetas(d.convidados) : [el('i', {}, 'não identificado')])),
-      el('div', {}, el('b', {}, 'Assunto: '), ...(d.temas.length ? etiquetas(d.temas) : [el('i', {}, 'não identificado (uso o padrão do canal)')])),
+      el('div', {}, el('b', {}, 'Assunto: '), ...(d.temas.length ? etiquetas(d.temas) : [el('i', {}, 'não identificado')])),
+      d.palavras && d.palavras.length ? el('div', {}, el('b', {}, 'Palavras do título: '), ...etiquetas(d.palavras)) : null,
       d.tituloEpisodio ? cinza('Episódio completo: ' + d.tituloEpisodio) : null,
       ...Object.entries(d.wiki || {}).map(([k, v]) => cinza('Wikipédia (' + k + '): ' + v.slice(0, 140) + '…'))].filter(Boolean));
   }
 
-  const ROTULO_ORIGEM = { citado: 'citado no corte', tema: 'assunto do corte', convidado: 'convidado', 'tema-ep': 'assunto do episódio', coringa: 'coringa' };
+  const ROTULO_ORIGEM = { citado: 'citado no corte', tema: 'assunto do corte', titulo: 'palavra do título', convidado: 'convidado', 'tema-ep': 'assunto do episódio', coringa: 'coringa' };
 
   function mostrarSugestoes(candidatos, faltam, jaTem) {
     const box = limpar(document.getElementById('pf-conf'));
