@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Produtos Flow — marcar produtos no YouTube Studio
 // @namespace    produtos-flow.cortes
-// @version      1.10.0
+// @version      1.11.0
 // @description  Escolhe produtos ligados ao convidado e ao assunto do corte, marca no Studio, distribui os tempos e PARA para conferência humana. Não salva nada sozinho. Sem IA.
 // @match        https://studio.youtube.com/*
 // @grant        GM_xmlhttpRequest
@@ -32,7 +32,7 @@
 
 (function () {
   'use strict';
-  const VERSAO = '1.10.0';
+  const VERSAO = '1.11.0';
 
   // ====================================================================================
   //  LISTAS — para acrescentar convidado ou tema, copie um bloco e troque os textos.
@@ -1206,6 +1206,26 @@
     for (const f of filhos) if (f !== null && f !== undefined && f !== false) e.append(f);
     return e;
   }
+  // O Studio às vezes não deixa digitar em campos de fora dele (prende o foco na janela de produtos
+  // ou intercepta o teclado). Por isso, clicar num campo do painel abre uma janelinha do próprio
+  // navegador para digitar — essa funciona sempre.
+  function campoDigitavel(campo, titulo, aoMudar, multilinha = false) {
+    const sep = typeof multilinha === 'string' ? multilinha : ';';
+    const abrir = (ev) => {
+      if (ev) { ev.preventDefault(); ev.stopPropagation(); }
+      const atual = multilinha ? campo.value.split(/\r?\n/).filter(Boolean).join(' ' + sep + ' ') : campo.value;
+      const r = window.prompt(titulo + (multilinha ? '\n(separe os itens com ' + sep + ')' : ''), atual);
+      if (r === null) return;
+      campo.value = multilinha ? r.split(sep).map(x => x.trim()).filter(Boolean).join('\n') : r.trim();
+      aoMudar && aoMudar(campo.value);
+    };
+    campo.readOnly = true;
+    campo.style.cursor = 'pointer';
+    campo.title = 'Clique para digitar';
+    campo.addEventListener('mousedown', abrir);
+    campo.addEventListener('focus', () => campo.blur());
+    return campo;
+  }
   const limpar = box => { while (box.firstChild) box.removeChild(box.firstChild); return box; };
   const cinza = (...f) => el('div', { style: 'color:#999;margin-top:4px' }, ...f);
 
@@ -1219,12 +1239,15 @@
     const alvo = el('input', { type: 'number', id: 'pf-alvo', min: '1', max: '30' }); alvo.value = cfg.alvo;
     const autoCx = el('input', { type: 'checkbox', id: 'pf-auto' }); autoCx.checked = cfg.auto;
     const dica = el('input', { type: 'text', id: 'pf-dica', placeholder: 'palavras separadas por vírgula', style: 'width:100%;background:#111;color:#eee;border:1px solid #444;border-radius:6px;padding:4px;margin-top:3px' });
-    dica.oninput = () => { cfg.dica = dica.value; };
+    campoDigitavel(dica, 'Assunto do corte (palavras separadas por vírgula):', v => { cfg.dica = v; });
+    const numero = (input, nome, chave, padrao) => campoDigitavel(input, nome + ' (número):', v => { const n = Math.max(1, Math.min(30, Number(v) || padrao)); input.value = n; cfg[chave] = n; GM_setValue(chave, n); });
     const maximo = el('input', { type: 'number', id: 'pf-max', min: '1', max: '30' }); maximo.value = cfg.maximo;
     const minimo = el('input', { type: 'number', id: 'pf-min', min: '1', max: '30' }); minimo.value = cfg.minimo;
     const extras = el('textarea', { id: 'pf-extras' }); extras.value = cfg.extras;
+    campoDigitavel(extras, 'Convidados extras. Formato: Nome = busca 1; busca 2', v => { cfg.extras = v; GM_setValue('extras', v); status('Convidados extras guardados (' + lerExtras(v).length + ').'); }, '|');
     const salvarExtras = el('button', { class: 'pf sec', id: 'pf-salvar-extras' }, 'Guardar convidados extras');
     const coringas = el('textarea', { id: 'pf-coringas' }); coringas.value = cfg.coringas;
+    campoDigitavel(coringas, 'Itens coringa (uma busca por item):', v => { cfg.coringas = v; GM_setValue('coringas', v); status('Itens coringa guardados (' + listaCoringas().length + ').'); }, true);
     const salvarCoringas = el('button', { class: 'pf sec' }, 'Guardar itens coringa');
     const copiar = el('button', { class: 'pf sec', id: 'pf-copiar' }, '📋 Copiar relatório (para mandar ao Claude)');
     const painel = el('div', { id: 'pf-painel' },
@@ -1253,6 +1276,11 @@
           coringas, salvarCoringas)),
       el('section', {}, el('h4', {}, 'Registro'), el('div', { id: 'pf-log' }), copiar));
     document.body.append(botao, painel);
+    numero(alvo, 'Quantos produtos (manual)', 'alvo', 10);
+    numero(minimo, 'Mínimo de produtos', 'minimo', 5);
+    numero(maximo, 'Máximo de produtos', 'maximo', 10);
+    // não deixa o teclado do painel acionar atalhos do Studio
+    for (const tipo of ['keydown', 'keyup', 'keypress']) painel.addEventListener(tipo, e => e.stopPropagation());
     fechar.onclick = () => painel.classList.remove('aberto');
     autoCx.onchange = () => { cfg.auto = autoCx.checked; GM_setValue('auto', cfg.auto); };
     maximo.onchange = e => { cfg.maximo = Math.max(1, Math.min(30, Number(e.target.value) || 10)); GM_setValue('maximo', cfg.maximo); };
@@ -1325,7 +1353,8 @@
     const box = document.getElementById('pf-aviso'); limpar(box); box.style.display = 'block';
     const lista = (ultimosEscolhidos.length ? ultimosEscolhidos : ultimosCandidatos).slice(0, 16);
     const caixas = lista.map(p => ({ p, c: el('input', { type: 'checkbox' }) }));
-    const texto = el('textarea', { placeholder: 'Ex.: o assunto era STF e veio livro de economia; faltou produto do convidado…' });
+    const texto = el('textarea', { placeholder: 'Clique aqui para escrever o que ficou errado…' });
+    campoDigitavel(texto, 'O que ficou errado? (ex.: o assunto era STF e veio livro de economia)', null);
     box.append(...[
       el('h4', {}, '📨 O que ficou errado?'),
       texto,
