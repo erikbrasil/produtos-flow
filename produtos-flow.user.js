@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Produtos Flow — marcar produtos no YouTube Studio
 // @namespace    produtos-flow.cortes
-// @version      1.5.0
+// @version      1.6.0
 // @description  Escolhe produtos ligados ao convidado e ao assunto do corte, marca no Studio, distribui os tempos e PARA para conferência humana. Não salva nada sozinho. Sem IA.
 // @match        https://studio.youtube.com/*
 // @grant        GM_xmlhttpRequest
@@ -32,7 +32,7 @@
 
 (function () {
   'use strict';
-  const VERSAO = '1.5.0';
+  const VERSAO = '1.6.0';
 
   // ====================================================================================
   //  LISTAS — para acrescentar convidado ou tema, copie um bloco e troque os textos.
@@ -512,22 +512,37 @@
     return out;
   }
 
-  // Tempos: começa em 0:30, cada produto até 60 s, espalhados até o fim.
+  // Tempos. Regras do Studio: cada produto tem UM trecho, de 15 a 60 segundos, e o primeiro
+  // começa em 0:30 ou depois. Para não sobrar buraco, os trechos ficam COLADOS um no outro
+  // (cada um termina onde começa o próximo). Se os produtos não bastarem para cobrir o vídeo
+  // todo (cada um cobre no máximo 60 s), os buracos que sobram ficam iguais entre si.
+  const TEMPO_MAX = 60, TEMPO_MIN = 16;
+  function produtosParaCobrir(duracao) { return Math.max(1, Math.ceil((Math.floor(duracao) - 1 - 30) / TEMPO_MAX)); }
   function planoDeTempos(duracao, n) {
-    const fim = Math.floor(duracao);
     if (!Number.isFinite(duracao) || n < 1) throw Error('Duração do vídeo não encontrada.');
-    const ultimoInicio = fim - 60;
-    if (ultimoInicio < 30) throw Error('Vídeo curto demais para marcar tempos (precisa de mais de 1min30).');
-    const passo = n > 1 ? (ultimoInicio - 30) / (n - 1) : 0;
-    if (n > 1 && passo < 15) throw Error('Não cabem ' + n + ' tempos de pelo menos 15 segundos neste vídeo.');
-    const inicios = Array.from({ length: n }, (_, i) => Math.floor(30 + i * passo));
-    return inicios.map((ini, i) => ({ indice: i, inicio: ini, fim: Math.min(ini + 60, inicios[i + 1] ?? fim, fim) }));
+    const fim = Math.floor(duracao) - 1; // o Studio corta no último segundo inteiro
+    const disponivel = fim - 30;
+    if (disponivel < TEMPO_MIN) throw Error('Vídeo curto demais para marcar tempos.');
+    let inicios;
+    if (n * TEMPO_MAX >= disponivel) {
+      const passo = disponivel / n; // cobre tudo, sem buraco
+      if (passo < TEMPO_MIN) throw Error('Não cabem ' + n + ' tempos de pelo menos ' + TEMPO_MIN + ' segundos neste vídeo.');
+      inicios = Array.from({ length: n }, (_, i) => Math.floor(30 + i * passo));
+    } else {
+      const passo = n > 1 ? (disponivel - TEMPO_MAX) / (n - 1) : 0; // produtos de menos: buracos iguais
+      inicios = Array.from({ length: n }, (_, i) => Math.floor(30 + i * passo));
+    }
+    return inicios.map((ini, i) => ({ indice: i, inicio: ini, fim: Math.min(ini + TEMPO_MAX, inicios[i + 1] ?? fim, fim) }));
+  }
+  function cobertura(plano, duracao) {
+    const coberto = plano.reduce((t, p) => t + (p.fim - p.inicio), 0);
+    return { coberto, total: Math.max(0, Math.floor(duracao) - 1 - 30), faltaProdutos: Math.max(0, produtosParaCobrir(duracao) - plano.length) };
   }
 
   const mmss = s => Math.floor(s / 60) + ':' + String(Math.floor(s % 60)).padStart(2, '0');
 
   if (typeof module !== 'undefined' && module.exports) {
-    module.exports = { ehPessoa, repetido, CITADOS, CORINGAS_PADRAO, norm, tem, detectar, planoDeBuscas, aceita, escolher, planoDeTempos, linkEpisodio, nomeDoEpisodio, nomesDoEpisodio, titulo1, limparDescricao, lerExtras, CONVIDADOS, TEMAS, INDISPONIVEL };
+    module.exports = { produtosParaCobrir, cobertura, ehPessoa, repetido, CITADOS, CORINGAS_PADRAO, norm, tem, detectar, planoDeBuscas, aceita, escolher, planoDeTempos, linkEpisodio, nomeDoEpisodio, nomesDoEpisodio, titulo1, limparDescricao, lerExtras, CONVIDADOS, TEMAS, INDISPONIVEL };
     return;
   }
 
@@ -537,13 +552,15 @@
 
   const cfg = {
     alvo: Number(GM_getValue('alvo', 10)) || 10,
+    auto: GM_getValue('auto', true) !== false,
+    maximo: Number(GM_getValue('maximo', 10)) || 10,
     minimo: Number(GM_getValue('minimo', 5)) || 5,
     extras: String(GM_getValue('extras', '')),
     coringas: String(GM_getValue('coringas', CORINGAS_PADRAO.join('\n'))),
   };
   const listaCoringas = () => cfg.coringas.split(/\r?\n/).map(x => x.trim()).filter(Boolean);
   const log = [];
-  let ocupado = false, parar = false, etapa = 'inicio', ultimaDeteccao = null, ultimosEscolhidos = [], ultimosCandidatos = [];
+  let ocupado = false, parar = false, etapa = 'inicio', ultimaDeteccao = null, ultimosEscolhidos = [], ultimosCandidatos = [], ultimaCobertura = null;
 
   const espera = ms => new Promise(r => setTimeout(r, ms));
   const humano = () => espera(450 + Math.random() * 500);
@@ -712,7 +729,15 @@
     if (ja === null) registrar('Aviso: não consegui ler o contador de produtos marcados.');
     const jaTem = ja || 0;
     if (jaTem > 0) registrar('Este vídeo já tem ' + jaTem + ' produto(s). Vou manter e só completar.');
-    const faltam = Math.max(0, cfg.alvo - jaTem);
+    // quantidade: no automático, o suficiente para cobrir o vídeo inteiro (cada produto cobre até 1 min)
+    const durs = todos('video').map(v => v.duration).filter(n => Number.isFinite(n) && n > 0);
+    const duracaoVideo = durs.length ? Math.max(...durs) : NaN;
+    let alvo = cfg.alvo;
+    if (cfg.auto && Number.isFinite(duracaoVideo)) {
+      alvo = Math.min(cfg.maximo, Math.max(cfg.minimo, produtosParaCobrir(duracaoVideo)));
+      registrar('Vídeo de ' + mmss(duracaoVideo) + ': para cobrir tudo precisa de ' + produtosParaCobrir(duracaoVideo) + ' produto(s); vou buscar ' + alvo + '.');
+    }
+    const faltam = Math.max(0, alvo - jaTem);
 
     const achados = []; const resumoBuscas = [];
     for (const q of plano) {
@@ -830,6 +855,9 @@
     const plano = planoDeTempos(duracao, linhas.length);
     const jaTinham = linhas.filter(l => l.marcado).length;
     registrar('Duração ' + mmss(duracao) + ' — ' + linhas.length + ' tempos planejados' + (jaTinham ? ' (' + jaTinham + ' já tinham tempo, vou pular)' : '') + '.');
+    const cob = cobertura(plano, duracao);
+    ultimaCobertura = cob;
+    registrar(cob.faltaProdutos ? 'Atenção: ' + linhas.length + ' produtos cobrem ' + mmss(cob.coberto) + ' de ' + mmss(cob.total) + '. Para não sobrar buraco, faltam ' + cob.faltaProdutos + ' produto(s).' : 'Os tempos cobrem o vídeo todo, sem buraco.');
 
     // de trás para frente: o Studio corta um intervalo novo no começo do próximo
     for (let k = plano.length - 1; k >= 0; k--) {
@@ -977,6 +1005,8 @@
     botao.onclick = () => document.getElementById('pf-painel').classList.toggle('aberto');
     const fechar = el('button', { class: 'pf sec', id: 'pf-fechar', style: 'margin:0' }, '✕');
     const alvo = el('input', { type: 'number', id: 'pf-alvo', min: '1', max: '30' }); alvo.value = cfg.alvo;
+    const autoCx = el('input', { type: 'checkbox', id: 'pf-auto' }); autoCx.checked = cfg.auto;
+    const maximo = el('input', { type: 'number', id: 'pf-max', min: '1', max: '30' }); maximo.value = cfg.maximo;
     const minimo = el('input', { type: 'number', id: 'pf-min', min: '1', max: '30' }); minimo.value = cfg.minimo;
     const extras = el('textarea', { id: 'pf-extras' }); extras.value = cfg.extras;
     const salvarExtras = el('button', { class: 'pf sec', id: 'pf-salvar-extras' }, 'Guardar convidados extras');
@@ -993,7 +1023,9 @@
       el('section', { id: 'pf-aviso', style: 'display:none' }),
       el('section', {},
         el('h4', {}, 'Ajustes'),
-        el('label', {}, 'Quantos produtos ', alvo),
+        el('label', {}, autoCx, ' Automático (cobrir o vídeo todo)'), el('br'),
+        el('label', {}, 'Quantos (manual) ', alvo),
+        el('label', {}, 'Máximo ', maximo),
         el('label', {}, 'Mínimo ', minimo),
         el('details', { style: 'margin-top:8px' },
           el('summary', {}, 'Convidados extras (sem mexer no código)'),
@@ -1006,6 +1038,8 @@
       el('section', {}, el('h4', {}, 'Registro'), el('div', { id: 'pf-log' }), copiar));
     document.body.append(botao, painel);
     fechar.onclick = () => painel.classList.remove('aberto');
+    autoCx.onchange = () => { cfg.auto = autoCx.checked; GM_setValue('auto', cfg.auto); };
+    maximo.onchange = e => { cfg.maximo = Math.max(1, Math.min(30, Number(e.target.value) || 10)); GM_setValue('maximo', cfg.maximo); };
     alvo.onchange = e => { cfg.alvo = Math.max(1, Math.min(30, Number(e.target.value) || 10)); GM_setValue('alvo', cfg.alvo); };
     minimo.onchange = e => { cfg.minimo = Math.max(1, Math.min(30, Number(e.target.value) || 5)); GM_setValue('minimo', cfg.minimo); };
     salvarExtras.onclick = () => { cfg.extras = extras.value; GM_setValue('extras', cfg.extras); status('Convidados extras guardados (' + lerExtras(cfg.extras).length + ').'); };
@@ -1127,6 +1161,7 @@
     box.style.display = 'block';
     box.append(...[
       el('h4', {}, '⏸ Parada 2 — confira os tempos'),
+      ultimaCobertura && ultimaCobertura.faltaProdutos ? el('div', { class: 'pf-alerta' }, 'Sobrou trecho sem produto: cada produto cobre no máximo 1 minuto. Para cobrir o vídeo todo, faltam ' + ultimaCobertura.faltaProdutos + ' produto(s) — volte, marque mais e rode os tempos de novo.') : null,
       el('div', { class: 'pf-ok' }, 'Os tempos foram colocados. ', el('b', {}, 'Confira na janela do Studio'), ' e, se estiver tudo certo, clique em ', el('b', {}, '"Pronto"'), '.', el('br'),
         'Em vídeo já publicado, depois clique também em ', el('b', {}, '"Salvar"'), ' no alto da página.'),
       el('div', { style: 'color:#aaa;margin-top:6px' }, 'O script não clica em Pronto, Salvar nem Publicar.')].filter(Boolean));
