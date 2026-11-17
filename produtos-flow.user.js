@@ -1,13 +1,14 @@
 // ==UserScript==
 // @name         Produtos Flow — marcar produtos no YouTube Studio
 // @namespace    produtos-flow.cortes
-// @version      1.11.0
+// @version      1.12.0
 // @description  Escolhe produtos ligados ao convidado e ao assunto do corte, marca no Studio, distribui os tempos e PARA para conferência humana. Não salva nada sozinho. Sem IA.
 // @match        https://studio.youtube.com/*
 // @grant        GM_xmlhttpRequest
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_setClipboard
+// @grant        GM_openInTab
 // @connect      www.youtube.com
 // @connect      pt.wikipedia.org
 // @run-at       document-idle
@@ -32,7 +33,7 @@
 
 (function () {
   'use strict';
-  const VERSAO = '1.11.0';
+  const VERSAO = '1.12.0';
 
   // ====================================================================================
   //  LISTAS — para acrescentar convidado ou tema, copie um bloco e troque os textos.
@@ -95,7 +96,7 @@
     },
     'politica': {
       nome: 'Política',
-      chaves: ['eleicao*', 'eleitor*', 'eleitora*', 'campanha*', 'voto*', 'votar', 'candidat*', 'bolsonar*', 'lula', 'congresso', 'deputad*', 'senador*', 'senado', 'prefeit*', 'governador*', 'presidente', 'direita', 'esquerda', 'polariza*', 'narrativa*', 'fundao', 'partido*', 'mbl', 'politic*', 'ministro*', 'impeachment', '6x1', 'prorrogacao', 'vereador*', 'ativista*'],
+      chaves: ['eleicao*', 'eleitor*', 'eleitora*', 'campanha*', 'voto*', 'votar', 'candidat*', 'bolsonar*', 'lula', 'congresso', 'deputad*', 'senador*', 'senado', 'prefeit*', 'governador*', 'presidente', 'direita', 'esquerda', 'polariza*', 'narrativa*', 'fundao', 'partido*', 'mbl', 'politic*', 'ministro*', 'impeachment', '6x1', '6 por 1', '6 por1', 'escala 6', 'prorrogacao', 'vereador*', 'ativista*'],
       buscas: [
         ['Livro política brasileira', [['livro'], ['politic*', 'eleic*', 'democracia', 'brasil']]],
         ['Constituição Federal', [['constituicao']]],
@@ -374,7 +375,7 @@
     }).filter(c => c.apelidos[0]);
   }
 
-  function detectar({ titulo, descricao, tags, tituloEpisodio, extras, wiki, transcricao }) {
+  function detectar({ titulo, descricao, tags, tituloEpisodio, extras, wiki, transcricao, segs }) {
     const desc = limparDescricao(descricao);
     // convidado extra com o mesmo nome de um da lista: junta as buscas dos dois
     const todos = CONVIDADOS.map(c => ({ ...c }));
@@ -432,7 +433,7 @@
     // palavras que aparecem no título E na fala vêm primeiro; depois as mais faladas; depois as do título
     const ambos = doTitulo.filter(w => fala.some(f => f.startsWith(w.slice(0, 5))));
     const palavras = [...new Set([...ambos, ...fala.slice(0, 3), ...doTitulo])].slice(0, 4);
-    return { citados, convidados: convidados.slice(0, 4), temas: temasFinais, palavras, fala };
+    return { citados, convidados: convidados.slice(0, 4), temas: temasFinais, palavras, fala, livros: segs ? livrosCitados(segs) : [] };
   }
 
   // quantas vezes os termos aparecem no texto (termo com * = começa com)
@@ -475,6 +476,55 @@
     // junta plural/singular simples ("bancos" + "banco")
     for (const [w, n] of [...cont]) if (w.endsWith('s') && cont.has(w.slice(0, -1))) { cont.set(w.slice(0, -1), cont.get(w.slice(0, -1)) + n); cont.delete(w); }
     return [...cont].filter(([, n]) => n >= 3).sort((a, b) => b[1] - a[1]).slice(0, 6).map(([w]) => w);
+  }
+
+  // LIVROS CITADOS na fala: o que vem depois de "o livro", "a obra", "livro chamado"… até a pontuação.
+  const INICIO_RUIM = /^(que|e|é|foi|um|uma|isso|esse|essa|dele|dela|meu|minha|seu|sua|novo|nova|inteiro|todo|toda|aqui|ali|lá|né|tá|pra|para|de|do|da|no|na)\b/i;
+  function livrosCitados(segs) {
+    const out = [], vistos = new Set();
+    const re = /\b(?:o |um |seu |meu |esse |nesse |no )?(?:livro|obra|best[- ]?seller)\s+(?:chamad[oa]\s+|que se chama\s+|intitulad[oa]\s+)?["“'‘]?([^,.;:!?"”’\n]{3,60})/gi;
+    for (const sg of segs) {
+      let m;
+      while ((m = re.exec(sg.texto))) {
+        let t = m[1].trim().split(/\s+(?:e|que|mas|porque|aí|então|né|tá|foi|é|era|onde|quando|pra|para)\s+/i)[0].split(/\s+/).slice(0, 6).join(' ');
+        if (INICIO_RUIM.test(t) || palavrasFortes(t).length < 1) continue;
+        const k = norm(t);
+        if (k.length < 4 || vistos.has(k)) continue;
+        vistos.add(k); out.push({ titulo: t, tempo: Math.floor(sg.ini) });
+      }
+    }
+    return out.slice(0, 6);
+  }
+  // Momento em que as palavras do produto mais aparecem na fala (janela de 60 s).
+  function momentoNaFala(segs, chaves) {
+    if (!segs || !segs.length || !chaves || !chaves.length) return null;
+    const hits = segs.map(sg => ({ t: sg.ini, n: frequencia(sg.texto, chaves) })).filter(h => h.n > 0);
+    if (!hits.length) return null;
+    let melhor = null;
+    for (const h of hits) {
+      const soma = hits.filter(x => x.t >= h.t && x.t < h.t + 60).reduce((a, x) => a + x.n, 0);
+      if (!melhor || soma > melhor.soma) melhor = { t: h.t, soma };
+    }
+    return Math.floor(melhor.t);
+  }
+  // Põe cada produto no trecho mais perto do momento em que ele é falado; os sem momento
+  // (coringas etc.) ficam com os trechos que sobrarem, sem empurrar os outros.
+  function atribuirTrechos(plano, prefs) {
+    const livres = new Set(plano.map((_, i) => i));
+    const linhaDoTrecho = new Array(plano.length).fill(null);
+    const comMomento = prefs.map((t, linha) => ({ t, linha })).filter(x => Number.isFinite(x.t)).sort((a, b) => a.t - b.t);
+    for (const { t, linha } of comMomento) {
+      let melhor = null;
+      for (const i of livres) {
+        const meio = plano[i].inicio + (plano[i].fim - plano[i].inicio) / 2;
+        const d = Math.abs(meio - t);
+        if (melhor === null || d < melhor.d) melhor = { i, d };
+      }
+      if (melhor) { linhaDoTrecho[melhor.i] = linha; livres.delete(melhor.i); }
+    }
+    const semMomento = prefs.map((t, linha) => ({ t, linha })).filter(x => !Number.isFinite(x.t)).map(x => x.linha);
+    for (const i of [...livres].sort((a, b) => a - b)) linhaDoTrecho[i] = semMomento.shift();
+    return linhaDoTrecho;
   }
 
   // Palavras "de assunto" do título do corte: tira artigos, verbos de chamada ("revela", "quebrou"),
@@ -530,35 +580,41 @@
       const fortes = palavrasFortes(d);
       if (!fortes.length) continue;
       const ex = fortes.map(w => [w.length > 4 ? w.slice(0, w.length - 1) + '*' : w]);
-      fila.push({ busca: 'livro ' + d, exige: ex, recusa: RECUSA_LIVRO, origem: 'citado', rotulo: 'assunto digitado' });
-      fila.push({ busca: d, exige: ex, recusa: ['adesivo', 'capinha', 'case', 'pelicula'], origem: 'citado', rotulo: 'assunto digitado' });
+      fila.push({ busca: 'livro ' + d, exige: ex, recusa: RECUSA_LIVRO, origem: 'citado', rotulo: 'assunto digitado', chaves: fortes });
+      fila.push({ busca: d, exige: ex, recusa: ['adesivo', 'capinha', 'case', 'pelicula'], origem: 'citado', rotulo: 'assunto digitado', chaves: fortes });
+    }
+    // livros citados na fala (legenda do Studio)
+    for (const l of det.livros || []) {
+      const fortes = palavrasFortes(l.titulo).slice(0, 4);
+      if (fortes.length < 1) continue;
+      fila.push({ busca: 'livro ' + l.titulo, exige: [[fortes[0].length > 4 ? fortes[0].slice(0, fortes[0].length - 1) + '*' : fortes[0]]], recusa: RECUSA_LIVRO, origem: 'citado', rotulo: 'livro citado na fala', chaves: fortes, tempo: l.tempo });
     }
     const chavesAssunto = det.temas.flatMap(t => TEMAS[t.id].chaves);
     for (const c of det.citados || []) {
-      for (const b of c.buscas) fila.push({ busca: b, exige: [c.exige], recusa: [], origem: 'citado', rotulo: c.nome });
+      for (const b of c.buscas) fila.push({ busca: b, exige: [c.exige], recusa: [], origem: 'citado', rotulo: c.nome, chaves: c.apelidos });
     }
     // o ASSUNTO DO CORTE vem antes do convidado
     for (const t of det.temas.filter(t => t.doCorte)) {
       for (const [b, exige, recusa] of TEMAS[t.id].buscas) {
-        fila.push({ busca: b, exige: semLivro(exige), recusa: [...(recusa || []), ...(ehBuscaDeLivro(b) || exige.some(g => g.includes('livro')) ? RECUSA_LIVRO : [])], origem: 'tema', rotulo: t.nome });
+        fila.push({ busca: b, exige: semLivro(exige), recusa: [...(recusa || []), ...(ehBuscaDeLivro(b) || exige.some(g => g.includes('livro')) ? RECUSA_LIVRO : [])], origem: 'tema', rotulo: t.nome, chaves: TEMAS[t.id].chaves });
       }
     }
     // palavras do título do corte (ex.: "trânsito", "lasanha", "6x1") — o assunto do corte manda
     for (const w of det.palavras || []) {
       const ex = [[w.length > 4 ? w.slice(0, Math.max(4, w.length - 2)) + '*' : w]];
-      fila.push({ busca: 'livro ' + w, exige: ex, recusa: RECUSA_LIVRO, origem: 'titulo', rotulo: 'título do corte' });
-      fila.push({ busca: w, exige: ex, recusa: ['adesivo', 'capinha', 'case', 'pelicula'], origem: 'titulo', rotulo: 'título do corte' });
+      fila.push({ busca: 'livro ' + w, exige: ex, recusa: RECUSA_LIVRO, origem: 'titulo', rotulo: 'título do corte', chaves: [w] });
+      fila.push({ busca: w, exige: ex, recusa: ['adesivo', 'capinha', 'case', 'pelicula'], origem: 'titulo', rotulo: 'título do corte', chaves: [w] });
     }
     for (const t of det.temas.filter(t => !t.doCorte)) {
       for (const [b, exige, recusa] of TEMAS[t.id].buscas) {
-        fila.push({ busca: b, exige: semLivro(exige), recusa: [...(recusa || []), ...(ehBuscaDeLivro(b) || exige.some(g => g.includes('livro')) ? RECUSA_LIVRO : [])], origem: 'tema-ep', rotulo: t.nome });
+        fila.push({ busca: b, exige: semLivro(exige), recusa: [...(recusa || []), ...(ehBuscaDeLivro(b) || exige.some(g => g.includes('livro')) ? RECUSA_LIVRO : [])], origem: 'tema-ep', rotulo: t.nome, chaves: TEMAS[t.id].chaves });
       }
     }
     // convidado por último (antes dos coringas): no máximo 2 produtos
     for (const c of det.convidados) {
       for (const b of c.extrasBuscas || []) {
         const exige = tem(b, c.apelidos[0]) ? [c.exige] : palavrasFortes(b).map(w => [w + '*']);
-        fila.push({ busca: b, exige: exige.length ? exige : [c.exige], recusa: [], origem: 'convidado', rotulo: c.nome });
+        fila.push({ busca: b, exige: exige.length ? exige : [c.exige], recusa: [], origem: 'convidado', rotulo: c.nome, chaves: c.apelidos });
       }
       const buscasConv = [...c.buscas];
       if (c.desconhecido && det.temas.some(t => t.id === 'musica')) buscasConv.push(c.nome + ' CD', c.nome + ' vinil');
@@ -568,7 +624,7 @@
         let exige = c.exigePorBusca && !tem(b, c.apelidos[0]) ? palavrasFortes(b).map(w => [w + '*']) : [c.exige];
         if (!exige.length) exige = [c.exige];
         if (umaPalavra(c)) exige = [...exige, chavesAssunto];
-        fila.push({ busca: b, exige, recusa: umaPalavra(c) ? RECUSA_LIVRO : [], origem: 'convidado', rotulo: c.nome });
+        fila.push({ busca: b, exige, recusa: umaPalavra(c) ? RECUSA_LIVRO : [], origem: 'convidado', rotulo: c.nome, chaves: c.apelidos });
       }
     }
     const listaCoringa = (coringas && coringas.length ? coringas : CORINGAS_PADRAO);
@@ -617,6 +673,7 @@
       }
     };
     pega(achados.filter(p => p.origem === 'citado' && p.rotulo === 'assunto digitado'), alvo);
+    pega(achados.filter(p => p.origem === 'citado' && p.rotulo === 'livro citado na fala'), alvo);
     pega(achados.filter(p => p.origem === 'citado'), Math.min(alvo, out.length + 3));
     pega(achados.filter(p => p.origem === 'tema'), alvo);      // assunto do corte primeiro
     pega(achados.filter(p => p.origem === 'titulo'), alvo);    // palavras do título do corte
@@ -656,7 +713,7 @@
   const mmss = s => Math.floor(s / 60) + ':' + String(Math.floor(s % 60)).padStart(2, '0');
 
   if (typeof module !== 'undefined' && module.exports) {
-    module.exports = { palavrasDaFala, frequencia, palavrasDoTitulo, produtosParaCobrir, cobertura, ehPessoa, repetido, CITADOS, CORINGAS_PADRAO, norm, tem, detectar, planoDeBuscas, aceita, escolher, planoDeTempos, linkEpisodio, nomeDoEpisodio, nomesDoEpisodio, titulo1, limparDescricao, lerExtras, CONVIDADOS, TEMAS, INDISPONIVEL };
+    module.exports = { livrosCitados, momentoNaFala, atribuirTrechos, palavrasDaFala, frequencia, palavrasDoTitulo, produtosParaCobrir, cobertura, ehPessoa, repetido, CITADOS, CORINGAS_PADRAO, norm, tem, detectar, planoDeBuscas, aceita, escolher, planoDeTempos, linkEpisodio, nomeDoEpisodio, nomesDoEpisodio, titulo1, limparDescricao, lerExtras, CONVIDADOS, TEMAS, INDISPONIVEL };
     return;
   }
 
@@ -675,7 +732,7 @@
   };
   const listaCoringas = () => cfg.coringas.split(/\r?\n/).map(x => x.trim()).filter(Boolean);
   const log = [];
-  let ocupado = false, parar = false, etapa = 'inicio', ultimaDeteccao = null, ultimosEscolhidos = [], ultimosCandidatos = [], ultimaCobertura = null;
+  let ocupado = false, parar = false, etapa = 'inicio', ultimaDeteccao = null, ultimosEscolhidos = [], ultimosCandidatos = [], ultimaCobertura = null, ultimasFrases = null;
 
   const espera = ms => new Promise(r => setTimeout(r, ms));
   const humano = () => espera(450 + Math.random() * 500);
@@ -855,15 +912,24 @@
     }
     // convidado que não está na lista: procura a profissão dele na Wikipédia (sem IA)
     // fala do corte (legenda automática) → assuntos centrais
-    let transcricao = '';
+    let transcricao = '', segs = null;
     const idVideo = idDoVideo();
     if (idVideo) {
+      registrar('Lendo a legenda automática na página Legendas do Studio (aba escondida)…');
       try {
-        const r = await lerTranscricao(idVideo);
-        transcricao = r.texto;
-        registrar('Legenda lida (' + r.metodo + '): ' + transcricao.split(' ').length + ' palavras.');
-      } catch (e) { registrar('Sem legenda: ' + e.message + '. Sigo pelo título.'); }
+        const leg = await obterLegendaDoStudio(idVideo);
+        const durs0 = todos('video').map(v => v.duration).filter(n => Number.isFinite(n) && n > 0);
+        const dur = durs0.length ? Math.max(...durs0) : (leg.dur || 0);
+        segs = leg.segs.map((x, i, arr) => ({ ini: x.p * dur, fim: (arr[i + 1] ? arr[i + 1].p : 1) * dur, texto: x.texto }));
+        transcricao = segs.map(x => x.texto).join(' ');
+        registrar('Legenda lida pelo Studio: ' + segs.length + ' frases, ' + transcricao.split(' ').length + ' palavras.');
+      } catch (e) {
+        registrar('Legenda pelo Studio: ' + e.message + '.');
+        try { const r = await lerTranscricao(idVideo); transcricao = r.texto; registrar('Legenda lida (' + r.metodo + ').'); }
+        catch (e2) { registrar('Sem legenda: ' + e2.message + '. Sigo pelo título.'); }
+      }
     } else registrar('Não achei o código do vídeo para ler a legenda.');
+    ultimasFrases = segs;
     const det0 = detectar({ titulo, descricao, tags, tituloEpisodio, extras: cfg.extras, transcricao });
     const wiki = {};
     for (const c of det0.convidados.filter(c => c.desconhecido).slice(0, 2)) {
@@ -873,10 +939,11 @@
     const dicas = cfg.dica.split(/[,;\n]+/).map(x => x.trim()).filter(Boolean);
     const tituloComDica = dicas.length ? titulo + ' | ' + dicas.join(' ') : titulo;
     if (dicas.length) registrar('Assunto digitado: ' + dicas.join(', '));
-    const det = detectar({ titulo: tituloComDica, descricao, tags, tituloEpisodio, extras: cfg.extras, wiki, transcricao });
+    const det = detectar({ titulo: tituloComDica, descricao, tags, tituloEpisodio, extras: cfg.extras, wiki, transcricao, segs });
+    if (det.livros && det.livros.length) registrar('Livros citados na fala: ' + det.livros.map(l => l.titulo + ' (' + mmss(l.tempo) + ')').join('; '));
     det.dicas = dicas;
     if (det.fala && det.fala.length) registrar('Mais falado no corte: ' + det.fala.join(', '));
-    ultimaDeteccao = { fala: det.fala || [], palavras: det.palavras || [], titulo, tituloEpisodio, idEpisodio: idEp, tags: tags.slice(0, 15), citados: (det.citados || []).map(c => c.nome), convidados: det.convidados.map(c => c.nome + (c.desconhecido ? ' (do episódio)' : '')), temas: det.temas.map(t => t.nome + ' (' + t.pontos + ')'), wiki: Object.fromEntries(Object.entries(wiki).map(([k, v]) => [k, v.slice(0, 160)])) };
+    ultimaDeteccao = { livros: (det.livros || []).map(l => l.titulo), fala: det.fala || [], palavras: det.palavras || [], titulo, tituloEpisodio, idEpisodio: idEp, tags: tags.slice(0, 15), citados: (det.citados || []).map(c => c.nome), convidados: det.convidados.map(c => c.nome + (c.desconhecido ? ' (do episódio)' : '')), temas: det.temas.map(t => t.nome + ' (' + t.pontos + ')'), wiki: Object.fromEntries(Object.entries(wiki).map(([k, v]) => [k, v.slice(0, 160)])) };
     registrar('Citado no corte: ' + ((det.citados || []).map(c => c.nome).join(', ') || '—') + ' | Convidado: ' + (det.convidados.map(c => c.nome).join(', ') || 'não identificado') + ' | Assunto: ' + (det.temas.map(t => t.nome).join(', ') || 'não identificado'));
     mostrarDeteccao();
 
@@ -908,7 +975,7 @@
       for (const l of linhas) {
         if (l.marcado || l.indisponivel) continue;
         if (!aceita(l.nome, q)) continue;
-        achados.push({ nome: l.nome, busca: q.busca, origem: q.origem, rotulo: q.rotulo }); bons++;
+        achados.push({ nome: l.nome, busca: q.busca, origem: q.origem, rotulo: q.rotulo, chaves: q.chaves || [], tempo: q.tempo }); bons++;
       }
       resumoBuscas.push({ busca: q.busca, resultados: linhas.length, aceitos: bons });
       registrar('  ' + q.busca + ': ' + linhas.length + ' resultado(s), ' + bons + ' servem');
@@ -917,6 +984,7 @@
     ultimaDeteccao.buscas = resumoBuscas;
     // PRÉVIA: mostra as sugestões (as primeiras já marcadas) e espera você escolher
     const candidatos = escolher(achados, faltam + 6);
+    for (const c of candidatos) if (!Number.isFinite(c.tempo)) c.tempo = momentoNaFala(segs, c.chaves);
     ultimosCandidatos = candidatos;
     etapa = 'previa';
     registrar('PRÉVIA: ' + candidatos.length + ' sugestão(ões). Escolha quais marcar.');
@@ -1011,6 +1079,15 @@
     const acharLinha = (k) => { const ls = linhasDeTempo(painel); return porNome ? ls.find(l => l.nome === nomes[k]) : ls[k]; };
     if (linhas.every(l => l.marcado)) { etapa = 'conferir-tempos'; registrar('Todos os produtos já têm tempo.'); mostrarFinal(); return; }
     const plano = planoDeTempos(duracao, linhas.length);
+    // momento falado de cada produto (vem da prévia); linha ↔ produto pelo começo do nome
+    const chaveNome = n => norm(n).slice(0, 28);
+    const prefs = nomes.map(n => {
+      const p = ultimosEscolhidos.find(x => chaveNome(x.nome) && (chaveNome(n).startsWith(chaveNome(x.nome)) || chaveNome(x.nome).startsWith(chaveNome(n))));
+      return p && Number.isFinite(p.tempo) ? p.tempo : null;
+    });
+    const linhaDoTrecho = atribuirTrechos(plano, prefs);
+    const comMomento = prefs.filter(Number.isFinite).length;
+    if (comMomento) registrar(comMomento + ' produto(s) vão no trecho em que são falados; os outros ficam nos trechos que sobram.');
     const jaTinham = linhas.filter(l => l.marcado).length;
     registrar('Duração ' + mmss(duracao) + ' — ' + linhas.length + ' tempos planejados' + (jaTinham ? ' (' + jaTinham + ' já tinham tempo, vou pular)' : '') + '.');
     const cob = cobertura(plano, duracao);
@@ -1021,8 +1098,9 @@
     for (let k = plano.length - 1; k >= 0; k--) {
       if (parar) throw Error('Parado por você.');
       const passo = plano[k];
-      let linha = acharLinha(k);
-      if (!linha) throw Error('Não achei mais a linha do produto ' + (k + 1) + ' (' + (nomes[k] || '?') + ').');
+      const lk = linhaDoTrecho[k];
+      let linha = acharLinha(lk);
+      if (!linha) throw Error('Não achei mais a linha do produto ' + (lk + 1) + ' (' + (nomes[lk] || '?') + ').');
       if (linha.marcado) { registrar('Já tinha tempo, pulei: ' + linha.nome.slice(0, 60)); continue; }
       const valor = Math.floor(passo.inicio / 60) + ':' + String(passo.inicio % 60).padStart(2, '0') + ':00';
       cursor.focus();
@@ -1038,16 +1116,16 @@
         if (!cabeca) { posicionou = true; break; }
       }
       if (!posicionou) throw Error('O Studio não moveu o cursor para ' + mmss(passo.inicio) + '. Nenhum tempo foi colocado nesse ponto.');
-      linha = acharLinha(k);
-      if (!linha || linha.marcado) throw Error('A linha do produto ' + (k + 1) + ' mudou durante a operação.');
+      linha = acharLinha(lk);
+      if (!linha || linha.marcado) throw Error('A linha do produto ' + (lk + 1) + ' mudou durante a operação.');
       linha.add.scrollIntoView({ block: 'center' });
       await humano();
       linha.add.click();
       let feito = null;
-      for (let i = 0; i < 40; i++) { await espera(100); const l = acharLinha(k); if (l && l.marcado) { feito = l; break; } }
+      for (let i = 0; i < 40; i++) { await espera(100); const l = acharLinha(lk); if (l && l.marcado) { feito = l; break; } }
       if (!feito) throw Error('O Studio não confirmou o tempo de: ' + linha.nome + '. Não repeti o clique.');
       const iv = feito.intervalo;
-      registrar('Tempo ' + (k + 1) + ': ' + (iv ? mmss(iv.inicio) + '–' + mmss(iv.fim) : 'a partir de ' + mmss(passo.inicio)) + ' — ' + linha.nome.slice(0, 60));
+      registrar('Tempo ' + (k + 1) + ': ' + (iv ? mmss(iv.inicio) + '–' + mmss(iv.fim) : 'a partir de ' + mmss(passo.inicio)) + ' — ' + linha.nome.slice(0, 60) + (Number.isFinite(prefs[lk]) ? ' (falado em ' + mmss(prefs[lk]) + ')' : ''));
     }
     etapa = 'conferir-tempos';
     registrar('PARADA PARA CONFERÊNCIA: tempos colocados. Confira e clique em "Pronto" no Studio.');
@@ -1148,6 +1226,52 @@
     GM_setValue('fala:' + id, texto.slice(0, 60000));
     return { texto, metodo };
   }
+  // ===== LEGENDA PELO STUDIO =====
+  // Na página "Legendas" do Studio, quem gerencia o canal vê a legenda automática com o tempo de
+  // cada frase. O script abre essa página numa aba escondida, lê as frases e fecha a aba.
+  // NUNCA clica em "Salvar rascunho" nem em "Publicar".
+  const segTempo = t => { const p = String(t).split(':').map(Number); return p.length === 3 ? p[0] * 60 + p[1] + p[2] / 30 : p.length === 2 ? p[0] * 60 + p[1] : NaN; };
+  async function lerLegendaNestaAba() {
+    const ate = async (fn, ms = 30000) => { const t0 = Date.now(); while (Date.now() - t0 < ms) { const r = fn(); if (r) return r; await espera(300); } return null; };
+    const btnTexto = re => umVisivel(todos('ytcp-button, button, tp-yt-paper-button').filter(b => re.test((b.textContent || '').trim())));
+    const editar = await ate(() => btnTexto(/^Editar legendas$/i) || btnTexto(/^Edit subtitles$/i), 30000);
+    if (!editar) {
+      const sem = (document.body.innerText || '').match(/Adicionar legenda|Add subtitles|Adicionar idioma/i);
+      throw Error(sem ? 'o vídeo ainda não tem legenda automática' : 'não achei o botão "Editar legendas"');
+    }
+    editar.click();
+    // o editor abre com a transcrição inteira numa caixa de texto (com pontuação)
+    const caixa = await ate(() => { const tas = todos('ytve-captions-editor-modal textarea, ytve-lightweight-textarea textarea, textarea').sort((a, b) => b.value.length - a.value.length); return tas[0] && tas[0].value.length > 200 ? tas[0] : null; }, 40000);
+    if (!caixa) throw Error('a legenda não carregou (o vídeo pode ainda estar sem legenda automática)');
+    await espera(800);
+    const texto = caixa.value.replace(/\s+/g, ' ').trim();
+    const dur = (await ate(() => { const d = todos('video').map(v => v.duration).filter(n => Number.isFinite(n) && n > 0); return d.length ? Math.max(...d) : null; }, 8000)) || 0;
+    // frases com a posição relativa no texto (vira minuto proporcional ao tamanho da fala)
+    const frases = texto.split(/(?<=[.!?…])\s+/).filter(Boolean);
+    const segs = []; let pos = 0;
+    for (const f of frases) { segs.push({ p: pos / texto.length, texto: f }); pos += f.length + 1; }
+    return { segs, dur };
+  }
+  async function obterLegendaDoStudio(id) {
+    const guardada = GM_getValue('legenda:' + id, '');
+    if (guardada) { try { const j = JSON.parse(guardada); if (j.ok && j.segs?.length) return j; } catch {} }
+    GM_setValue('legenda:' + id, '');
+    const aba = GM_openInTab('https://studio.youtube.com/video/' + id + '/translations#pf-legenda', { active: false, insert: true, setParent: true });
+    try {
+      const t0 = Date.now();
+      while (Date.now() - t0 < 90000) {
+        if (parar) throw Error('parado por você');
+        await espera(700);
+        const v = GM_getValue('legenda:' + id, '');
+        if (!v) continue;
+        const j = JSON.parse(v);
+        if (!j.ok) throw Error(j.erro || 'falhou');
+        return j;
+      }
+      throw Error('a página de legendas demorou demais');
+    } finally { try { aba && aba.close && aba.close(); } catch {} }
+  }
+
   function idDoVideo() {
     const m = location.href.match(/\/video\/([A-Za-z0-9_-]{11})/) || location.href.match(/[?&]udvid=([A-Za-z0-9_-]{11})/);
     if (m) return m[1];
@@ -1315,6 +1439,7 @@
       d.citados && d.citados.length ? el('div', {}, el('b', {}, 'Citado no corte: '), ...etiquetas(d.citados)) : null,
       el('div', {}, el('b', {}, 'Convidado: '), ...(d.convidados.length ? etiquetas(d.convidados) : [el('i', {}, 'não identificado')])),
       el('div', {}, el('b', {}, 'Assunto: '), ...(d.temas.length ? etiquetas(d.temas) : [el('i', {}, 'não identificado')])),
+      d.livros && d.livros.length ? el('div', {}, el('b', {}, 'Livros citados: '), ...etiquetas(d.livros)) : null,
       d.fala && d.fala.length ? el('div', {}, el('b', {}, 'Mais falado no corte: '), ...etiquetas(d.fala)) : null,
       d.palavras && d.palavras.length ? el('div', {}, el('b', {}, 'Palavras usadas na busca: '), ...etiquetas(d.palavras)) : null,
       d.tituloEpisodio ? cinza('Episódio completo: ' + d.tituloEpisodio) : null,
@@ -1339,7 +1464,7 @@
       el('div', { style: 'color:#aaa;margin-bottom:4px' }, 'Nada foi marcado ainda. Desmarque o que não combina e marque os extras que quiser. ', contador),
       el('div', { style: 'max-height:260px;overflow:auto' }, ...caixas.map(({ p, c }) =>
         el('label', { style: 'display:flex;gap:6px;align-items:flex-start;margin:3px 0' }, c,
-          el('span', {}, p.nome, el('br'), el('span', { style: 'color:#888;font-size:11px' }, ROTULO_ORIGEM[p.origem] + ' · busca "' + p.busca + '"')))))].filter(Boolean));
+          el('span', {}, p.nome, el('br'), el('span', { style: 'color:#888;font-size:11px' }, (p.rotulo === 'livro citado na fala' ? 'livro citado na fala' : ROTULO_ORIGEM[p.origem]) + ' · busca "' + p.busca + '"' + (Number.isFinite(p.tempo) ? ' · falado em ' + mmss(p.tempo) : ''))))))].filter(Boolean));
     acoes(btn('✔ Marcar os escolhidos', () => {
       const lista = caixas.filter(x => x.c.checked).map(x => x.p);
       if (!lista.length) { status('Escolha pelo menos um produto.'); return; }
@@ -1455,6 +1580,18 @@
   }
 
   // O Studio é uma página que troca de tela sem recarregar: confere de tempos em tempos.
+  // Aba escondida aberta pelo próprio script só para ler a legenda: lê, guarda e não monta painel.
+  if (location.hash === '#pf-legenda') {
+    const id = (location.pathname.match(/\/video\/([A-Za-z0-9_-]{11})/) || [])[1];
+    if (id) {
+      (async () => {
+        try { const r = await lerLegendaNestaAba(); GM_setValue('legenda:' + id, JSON.stringify({ ok: true, segs: r.segs, dur: r.dur, t: Date.now() })); }
+        catch (e) { GM_setValue('legenda:' + id, JSON.stringify({ ok: false, erro: e.message, t: Date.now() })); }
+      })();
+    }
+    return;
+  }
+
   let falhouMontar = false;
   setInterval(() => {
     if (!document.body) return;
