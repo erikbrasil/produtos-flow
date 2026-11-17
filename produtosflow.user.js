@@ -1,14 +1,13 @@
 // ==UserScript==
 // @name         Produtos Flow — marcar produtos no YouTube Studio
 // @namespace    produtos-flow.cortes
-// @version      1.12.0
+// @version      1.12.1
 // @description  Escolhe produtos ligados ao convidado e ao assunto do corte, marca no Studio, distribui os tempos e PARA para conferência humana. Não salva nada sozinho. Sem IA.
 // @match        https://studio.youtube.com/*
 // @grant        GM_xmlhttpRequest
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_setClipboard
-// @grant        GM_openInTab
 // @connect      www.youtube.com
 // @connect      pt.wikipedia.org
 // @run-at       document-idle
@@ -33,7 +32,7 @@
 
 (function () {
   'use strict';
-  const VERSAO = '1.12.0';
+  const VERSAO = '1.12.1';
 
   // ====================================================================================
   //  LISTAS — para acrescentar convidado ou tema, copie um bloco e troque os textos.
@@ -915,7 +914,7 @@
     let transcricao = '', segs = null;
     const idVideo = idDoVideo();
     if (idVideo) {
-      registrar('Lendo a legenda automática na página Legendas do Studio (aba escondida)…');
+      registrar('Lendo a legenda do corte (pode levar até 1 minuto; não abre aba nova)…');
       try {
         const leg = await obterLegendaDoStudio(idVideo);
         const durs0 = todos('video').map(v => v.duration).filter(n => Number.isFinite(n) && n > 0);
@@ -924,6 +923,7 @@
         transcricao = segs.map(x => x.texto).join(' ');
         registrar('Legenda lida pelo Studio: ' + segs.length + ' frases, ' + transcricao.split(' ').length + ' palavras.');
       } catch (e) {
+        if (parar) throw Error('Parado por você.');
         registrar('Legenda pelo Studio: ' + e.message + '.');
         try { const r = await lerTranscricao(idVideo); transcricao = r.texto; registrar('Legenda lida (' + r.metodo + ').'); }
         catch (e2) { registrar('Sem legenda: ' + e2.message + '. Sigo pelo título.'); }
@@ -1228,48 +1228,56 @@
   }
   // ===== LEGENDA PELO STUDIO =====
   // Na página "Legendas" do Studio, quem gerencia o canal vê a legenda automática com o tempo de
-  // cada frase. O script abre essa página numa aba escondida, lê as frases e fecha a aba.
+  // cada frase. O script abre essa página num quadro invisível, lê as frases e apaga o quadro.
   // NUNCA clica em "Salvar rascunho" nem em "Publicar".
   const segTempo = t => { const p = String(t).split(':').map(Number); return p.length === 3 ? p[0] * 60 + p[1] + p[2] / 30 : p.length === 2 ? p[0] * 60 + p[1] : NaN; };
-  async function lerLegendaNestaAba() {
-    const ate = async (fn, ms = 30000) => { const t0 = Date.now(); while (Date.now() - t0 < ms) { const r = fn(); if (r) return r; await espera(300); } return null; };
-    const btnTexto = re => umVisivel(todos('ytcp-button, button, tp-yt-paper-button').filter(b => re.test((b.textContent || '').trim())));
-    const editar = await ate(() => btnTexto(/^Editar legendas$/i) || btnTexto(/^Edit subtitles$/i), 30000);
+  // Lê a legenda dentro de uma página do Studio (doc/win de um quadro invisível).
+  async function lerLegendaNoQuadro(doc, win) {
+    const ate = async (fn, ms) => { const t0 = Date.now(); while (Date.now() - t0 < ms) { if (parar) throw Error('parado por você'); const r = fn(); if (r) return r; await espera(400); } return null; };
+    const tq = sel => raizes(doc).flatMap(r => [...r.querySelectorAll(sel)]);
+    const vis = el => !!el && el.getClientRects().length > 0 && win.getComputedStyle(el).visibility !== 'hidden';
+    const btnTexto = re => tq('ytcp-button, button, tp-yt-paper-button').filter(vis).find(b => re.test((b.textContent || '').trim()));
+    const editar = await ate(() => btnTexto(/^Editar legendas$/i) || btnTexto(/^Edit subtitles$/i), 35000);
     if (!editar) {
-      const sem = (document.body.innerText || '').match(/Adicionar legenda|Add subtitles|Adicionar idioma/i);
-      throw Error(sem ? 'o vídeo ainda não tem legenda automática' : 'não achei o botão "Editar legendas"');
+      const txt = ((doc.body && doc.body.innerText) || '').replace(/\s+/g, ' ');
+      if (/Adicionar legenda|Add subtitles|Adicionar idioma|Add language/i.test(txt)) throw Error('o vídeo ainda não tem legenda automática (o YouTube demora um pouco depois do envio)');
+      const erro = txt.match(/(Ocorreu um erro|Algo deu errado|erro|não encontrad)[^.]{0,80}/i);
+      throw Error('não achei o botão "Editar legendas"' + (erro ? ' — a página disse: ' + erro[0] : ''));
     }
     editar.click();
-    // o editor abre com a transcrição inteira numa caixa de texto (com pontuação)
-    const caixa = await ate(() => { const tas = todos('ytve-captions-editor-modal textarea, ytve-lightweight-textarea textarea, textarea').sort((a, b) => b.value.length - a.value.length); return tas[0] && tas[0].value.length > 200 ? tas[0] : null; }, 40000);
+    // o editor abre com a transcrição inteira numa caixa de texto (com pontuação). Só lê; nada é salvo.
+    const caixa = await ate(() => { const t = tq('textarea').sort((x, y) => y.value.length - x.value.length)[0]; return t && t.value.length > 200 ? t : null; }, 40000);
     if (!caixa) throw Error('a legenda não carregou (o vídeo pode ainda estar sem legenda automática)');
     await espera(800);
     const texto = caixa.value.replace(/\s+/g, ' ').trim();
-    const dur = (await ate(() => { const d = todos('video').map(v => v.duration).filter(n => Number.isFinite(n) && n > 0); return d.length ? Math.max(...d) : null; }, 8000)) || 0;
+    const dur = (await ate(() => { const d = tq('video').map(v => v.duration).filter(n => Number.isFinite(n) && n > 0); return d.length ? Math.max(...d) : null; }, 8000)) || 0;
     // frases com a posição relativa no texto (vira minuto proporcional ao tamanho da fala)
     const frases = texto.split(/(?<=[.!?…])\s+/).filter(Boolean);
     const segs = []; let pos = 0;
     for (const f of frases) { segs.push({ p: pos / texto.length, texto: f }); pos += f.length + 1; }
-    return { segs, dur };
+    return { ok: true, segs, dur };
   }
+  // Abre a página Legendas do vídeo num quadro invisível DENTRO desta mesma aba (nenhuma aba nova),
+  // lê o texto e apaga o quadro. NUNCA clica em "Salvar", "Publicar" ou "Pronto".
   async function obterLegendaDoStudio(id) {
     const guardada = GM_getValue('legenda:' + id, '');
     if (guardada) { try { const j = JSON.parse(guardada); if (j.ok && j.segs?.length) return j; } catch {} }
-    GM_setValue('legenda:' + id, '');
-    const aba = GM_openInTab('https://studio.youtube.com/video/' + id + '/translations#pf-legenda', { active: false, insert: true, setParent: true });
+    const q = document.createElement('iframe');
+    q.setAttribute('aria-hidden', 'true'); q.tabIndex = -1;
+    q.style.cssText = 'position:fixed;left:-4000px;top:0;width:1280px;height:900px;opacity:0;pointer-events:none;border:0;';
+    q.src = '/video/' + id + '/translations';
+    document.body.appendChild(q);
     try {
       const t0 = Date.now();
-      while (Date.now() - t0 < 90000) {
+      while (!(q.contentDocument && q.contentDocument.body && /\/translations/.test(q.contentWindow.location.pathname))) {
         if (parar) throw Error('parado por você');
-        await espera(700);
-        const v = GM_getValue('legenda:' + id, '');
-        if (!v) continue;
-        const j = JSON.parse(v);
-        if (!j.ok) throw Error(j.erro || 'falhou');
-        return j;
+        if (Date.now() - t0 > 30000) throw Error('a página de legendas não abriu');
+        await espera(500);
       }
-      throw Error('a página de legendas demorou demais');
-    } finally { try { aba && aba.close && aba.close(); } catch {} }
+      const r = await lerLegendaNoQuadro(q.contentDocument, q.contentWindow);
+      GM_setValue('legenda:' + id, JSON.stringify({ ...r, t: Date.now() }));
+      return r;
+    } finally { try { q.remove(); } catch {} }
   }
 
   function idDoVideo() {
@@ -1580,18 +1588,6 @@
   }
 
   // O Studio é uma página que troca de tela sem recarregar: confere de tempos em tempos.
-  // Aba escondida aberta pelo próprio script só para ler a legenda: lê, guarda e não monta painel.
-  if (location.hash === '#pf-legenda') {
-    const id = (location.pathname.match(/\/video\/([A-Za-z0-9_-]{11})/) || [])[1];
-    if (id) {
-      (async () => {
-        try { const r = await lerLegendaNestaAba(); GM_setValue('legenda:' + id, JSON.stringify({ ok: true, segs: r.segs, dur: r.dur, t: Date.now() })); }
-        catch (e) { GM_setValue('legenda:' + id, JSON.stringify({ ok: false, erro: e.message, t: Date.now() })); }
-      })();
-    }
-    return;
-  }
-
   let falhouMontar = false;
   setInterval(() => {
     if (!document.body) return;
