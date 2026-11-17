@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Produtos Flow — marcar produtos no YouTube Studio
 // @namespace    produtos-flow.cortes
-// @version      1.8.0
+// @version      1.9.0
 // @description  Escolhe produtos ligados ao convidado e ao assunto do corte, marca no Studio, distribui os tempos e PARA para conferência humana. Não salva nada sozinho. Sem IA.
 // @match        https://studio.youtube.com/*
 // @grant        GM_xmlhttpRequest
@@ -32,7 +32,7 @@
 
 (function () {
   'use strict';
-  const VERSAO = '1.8.0';
+  const VERSAO = '1.9.0';
 
   // ====================================================================================
   //  LISTAS — para acrescentar convidado ou tema, copie um bloco e troque os textos.
@@ -362,7 +362,7 @@
     }).filter(c => c.apelidos[0]);
   }
 
-  function detectar({ titulo, descricao, tags, tituloEpisodio, extras, wiki }) {
+  function detectar({ titulo, descricao, tags, tituloEpisodio, extras, wiki, transcricao }) {
     const desc = limparDescricao(descricao);
     // convidado extra com o mesmo nome de um da lista: junta as buscas dos dois
     const todos = CONVIDADOS.map(c => ({ ...c }));
@@ -401,7 +401,10 @@
       for (const [txt, peso] of fontes) if (txt) pontos += Math.min(2, contar(txt, t.chaves)) * peso;
       if (textoWiki) pontos += Math.min(2, contar(textoWiki, t.chaves)); // profissão do convidado (Wikipédia)
       for (const c of convidados) if ((c.temas || []).includes(id)) pontos += 2; // assunto típico do convidado
-      const doCorte = contar(titulo || '', t.chaves) > 0;
+      // a fala do corte (legenda automática) conta como assunto DO CORTE
+      const naFala = transcricao ? frequencia(transcricao, t.chaves) : 0;
+      pontos += Math.min(6, naFala);
+      const doCorte = contar(titulo || '', t.chaves) > 0 || naFala >= 3;
       if (pontos >= 1) temas.push({ id, nome: t.nome, pontos: pontos + (doCorte ? 10 : 0), doCorte });
     }
     temas.sort((a, b) => b.pontos - a.pontos);
@@ -410,7 +413,56 @@
     const forte = temas.filter(t => t.pontos >= 2 || t.doCorte);
     const nomesConv = convidados.flatMap(c => [...(c.apelidos || []), norm(c.nome)]).join(' ').split(' ');
     const nomesCit = citados.flatMap(c => c.apelidos).join(' ').split(' ');
-    return { citados, convidados: convidados.slice(0, 4), temas: (forte.length ? forte : temas).slice(0, 3), palavras: palavrasDoTitulo(titulo, [...nomesConv, ...nomesCit]).filter(w => !(forte.length ? forte : temas).some(t => temAlgum(w, TEMAS[t.id].chaves))) };
+    const temasFinais = (forte.length ? forte : temas).slice(0, 3);
+    const jaNoAssunto = w => temasFinais.some(t => temAlgum(w, TEMAS[t.id].chaves));
+    const fala = transcricao ? palavrasDaFala(transcricao, [...nomesConv, ...nomesCit]).filter(w => !jaNoAssunto(w)) : [];
+    const doTitulo = palavrasDoTitulo(titulo, [...nomesConv, ...nomesCit]).filter(w => !jaNoAssunto(w));
+    // palavras que aparecem no título E na fala vêm primeiro; depois as mais faladas; depois as do título
+    const ambos = doTitulo.filter(w => fala.some(f => f.startsWith(w.slice(0, 5))));
+    const palavras = [...new Set([...ambos, ...fala.slice(0, 3), ...doTitulo])].slice(0, 4);
+    return { citados, convidados: convidados.slice(0, 4), temas: temasFinais, palavras, fala };
+  }
+
+  // quantas vezes os termos aparecem no texto (termo com * = começa com)
+  function frequencia(texto, termos) {
+    const t = ' ' + norm(texto) + ' ';
+    let n = 0;
+    for (const termo of termos) {
+      const pref = termo.endsWith('*'), p = norm(pref ? termo.slice(0, -1) : termo);
+      if (!p) continue;
+      const re = new RegExp(' ' + p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + (pref ? '' : ' '), 'g');
+      n += (t.match(re) || []).length;
+    }
+    return n;
+  }
+
+  // Assuntos centrais da FALA: as palavras com conteúdo mais repetidas na legenda (sem IA, só contagem).
+  const FALA_VAZIAS = new Set(('entao tipo assim cara mano velho ne nao sim tipo aham uhum olha olhar ouvir escuta entendeu entende ' +
+    'sabe saber sei sabia acho acha achar acredito pensar penso pensando falar falei falou falando dizer disse dizendo fazer faz fazendo feito ' +
+    'estar estou esta estava estavam estao estamos ficar fica ficou ter tenho tinha tinham temos teve tiveram poder pode podia posso podem ' +
+    'querer quero queria quer precisa precisar preciso vamos vou vai ia iam fui foram sendo sido seria seriam isso aquilo essa esse esses essas ' +
+    'aquela aquele aqueles daquela daquele dessa desse disso nisso naquela naquele pessoal pessoa pessoas gente galera mundo ninguem alguem ' +
+    'alguma algum algumas alguns muito muita muitos muitas pouco pouca bastante demais coisa coisas negocio negocios parada jeito forma maneira ' +
+    'tempo tempos hora horas vezes momento momentos agora hoje ontem amanha depois antes sempre nunca ainda tambem inclusive exatamente ' +
+    'realmente basicamente simplesmente justamente obviamente literalmente verdade certo certa errado claro tranquilo beleza pronto enfim ' +
+    'porque porem embora entretanto todavia contudo quando onde como qual quais quanto quanta quantos quantas quem cujo outro outra outros ' +
+    'outras mesmo mesma mesmos mesmas proprio propria tanto tanta tantos tantas todo toda todos todas cada qualquer quaisquer nenhum nenhuma ' +
+    'lugar parte lado frente atras dentro fora cima baixo perto longe ano anos mes meses semana semanas primeiro primeira segundo segunda ' +
+    'terceiro ultimo ultima grande grandes pequeno pequena maior menor melhor pior bom boa bons boas mal mau legal bacana doido doida louco ' +
+    'louca historia historias exemplo caso casos ideia ideias problema problemas questao situacao sentido nivel tipos vida vidas cabeca ' +
+    'dinheiro trabalho casa familia filho filha amigo amiga obrigado obrigada podcast flow igor monark episodio programa video videos canal ' +
+    'chegar chegou chega voltar voltou volta passar passou passa entrar entrou sair saiu deixar deixou deixa colocar colocou botar botou ' +
+    'pegar pegou pega levar levou leva achei ficando tava tavam tinha teria terao seja sejam fosse fossem estivesse tivesse houve haver').split(' '));
+  function palavrasDaFala(texto, ignorar = []) {
+    const fora = new Set(ignorar.filter(Boolean));
+    const cont = new Map();
+    for (const w of norm(texto).split(' ')) {
+      if (w.length < 5 || /\d/.test(w) || VAZIAS.has(w) || FALA_VAZIAS.has(w) || fora.has(w)) continue;
+      cont.set(w, (cont.get(w) || 0) + 1);
+    }
+    // junta plural/singular simples ("bancos" + "banco")
+    for (const [w, n] of [...cont]) if (w.endsWith('s') && cont.has(w.slice(0, -1))) { cont.set(w.slice(0, -1), cont.get(w.slice(0, -1)) + n); cont.delete(w); }
+    return [...cont].filter(([, n]) => n >= 3).sort((a, b) => b[1] - a[1]).slice(0, 6).map(([w]) => w);
   }
 
   // Palavras "de assunto" do título do corte: tira artigos, verbos de chamada ("revela", "quebrou"),
@@ -428,14 +480,14 @@
     'esclarece tudo sobre igor flow podcast monark convidado convidada episodio corte cortes ao aos esta estao seria sera eram foram ' +
     'tras partir pouca pouco poucos poucas conhece conhecem conhecer fica ficou ficar deu dar vem veio vira virou sai saiu chega chegou manda mandou ' +
     'entra entrou mostra mostrou mudou muda mudar acabou acaba cuidado atencao urgente exclusivo completo inteiro sabe sabem quanto quanta ' +
-    'assim entao enquanto lugar forma maneira certo errado errou acertou erraram acertaram ficaram mundo pessoas pessoa').split(' '));
+    'assim entao enquanto lugar forma maneira certo errado errou acertou erraram acertaram ficaram mundo pessoas pessoa parece parecer pais').split(' '));
   const CURTAS_VALEM = new Set(['6x1', 'stf', 'pcc', 'eua', 'ufc', 'gta', 'ps5', 'f1', 'ia', 'pix', 'mbl', 'tse', 'clt', 'inss', 'sus', 'otan']);
   function palavrasDoTitulo(titulo, ignorar = []) {
     const fora = new Set(ignorar.filter(Boolean));
     const vistas = new Set(), out = [];
     for (let w of norm(titulo).split(' ')) {
       w = w.replace(/(k)\1{2,}$/, '$1').replace(/k{2,}$/, ''); // "FIUKKKKK" -> "fiuk"
-      if (!w || vistas.has(w) || VAZIAS.has(w) || fora.has(w) || APRESENTADORES.includes(w)) continue;
+      if (!w || vistas.has(w) || VAZIAS.has(w) || FALA_VAZIAS.has(w) || fora.has(w) || APRESENTADORES.includes(w)) continue;
       if (/^k{2,}$|^(ha)+$|^(rs)+$/.test(w)) continue;
       if (w.length < 4 && !CURTAS_VALEM.has(w)) continue;
       if (/^\d+$/.test(w)) continue;
@@ -582,7 +634,7 @@
   const mmss = s => Math.floor(s / 60) + ':' + String(Math.floor(s % 60)).padStart(2, '0');
 
   if (typeof module !== 'undefined' && module.exports) {
-    module.exports = { palavrasDoTitulo, produtosParaCobrir, cobertura, ehPessoa, repetido, CITADOS, CORINGAS_PADRAO, norm, tem, detectar, planoDeBuscas, aceita, escolher, planoDeTempos, linkEpisodio, nomeDoEpisodio, nomesDoEpisodio, titulo1, limparDescricao, lerExtras, CONVIDADOS, TEMAS, INDISPONIVEL };
+    module.exports = { palavrasDaFala, frequencia, palavrasDoTitulo, produtosParaCobrir, cobertura, ehPessoa, repetido, CITADOS, CORINGAS_PADRAO, norm, tem, detectar, planoDeBuscas, aceita, escolher, planoDeTempos, linkEpisodio, nomeDoEpisodio, nomesDoEpisodio, titulo1, limparDescricao, lerExtras, CONVIDADOS, TEMAS, INDISPONIVEL };
     return;
   }
 
@@ -779,14 +831,25 @@
       tituloEpisodio = await tituloDoEpisodio(idEp).catch(e => { registrar('Não consegui ler o episódio completo: ' + e.message); return ''; });
     }
     // convidado que não está na lista: procura a profissão dele na Wikipédia (sem IA)
-    const det0 = detectar({ titulo, descricao, tags, tituloEpisodio, extras: cfg.extras });
+    // fala do corte (legenda automática) → assuntos centrais
+    let transcricao = '';
+    const idVideo = idDoVideo();
+    if (idVideo) {
+      try {
+        const r = await lerTranscricao(idVideo);
+        transcricao = r.texto;
+        registrar('Legenda lida (' + r.metodo + '): ' + transcricao.split(' ').length + ' palavras.');
+      } catch (e) { registrar('Sem legenda: ' + e.message + '. Sigo pelo título.'); }
+    } else registrar('Não achei o código do vídeo para ler a legenda.');
+    const det0 = detectar({ titulo, descricao, tags, tituloEpisodio, extras: cfg.extras, transcricao });
     const wiki = {};
     for (const c of det0.convidados.filter(c => c.desconhecido).slice(0, 2)) {
       const resumo = await resumoWikipedia(c.nome).catch(e => { registrar('Wikipédia sem resposta para ' + c.nome + ': ' + e.message); return ''; });
       if (resumo) { wiki[c.nome] = resumo; registrar('Wikipédia: ' + c.nome + ' — ' + resumo.slice(0, 110) + '…'); }
     }
-    const det = detectar({ titulo, descricao, tags, tituloEpisodio, extras: cfg.extras, wiki });
-    ultimaDeteccao = { palavras: det.palavras || [], titulo, tituloEpisodio, idEpisodio: idEp, tags: tags.slice(0, 15), citados: (det.citados || []).map(c => c.nome), convidados: det.convidados.map(c => c.nome + (c.desconhecido ? ' (do episódio)' : '')), temas: det.temas.map(t => t.nome + ' (' + t.pontos + ')'), wiki: Object.fromEntries(Object.entries(wiki).map(([k, v]) => [k, v.slice(0, 160)])) };
+    const det = detectar({ titulo, descricao, tags, tituloEpisodio, extras: cfg.extras, wiki, transcricao });
+    if (det.fala && det.fala.length) registrar('Mais falado no corte: ' + det.fala.join(', '));
+    ultimaDeteccao = { fala: det.fala || [], palavras: det.palavras || [], titulo, tituloEpisodio, idEpisodio: idEp, tags: tags.slice(0, 15), citados: (det.citados || []).map(c => c.nome), convidados: det.convidados.map(c => c.nome + (c.desconhecido ? ' (do episódio)' : '')), temas: det.temas.map(t => t.nome + ' (' + t.pontos + ')'), wiki: Object.fromEntries(Object.entries(wiki).map(([k, v]) => [k, v.slice(0, 160)])) };
     registrar('Citado no corte: ' + ((det.citados || []).map(c => c.nome).join(', ') || '—') + ' | Convidado: ' + (det.convidados.map(c => c.nome).join(', ') || 'não identificado') + ' | Assunto: ' + (det.temas.map(t => t.nome).join(', ') || 'não identificado'));
     mostrarDeteccao();
 
@@ -1011,6 +1074,76 @@
     return t;
   }
 
+  // LEGENDA AUTOMÁTICA do vídeo (para descobrir o assunto pela fala). Dois jeitos:
+  // 1) a faixa de legenda que a página do vídeo indica; 2) o painel "Mostrar transcrição".
+  function pedirTexto(url, opcoes = {}) {
+    return new Promise((ok, erro) => GM_xmlhttpRequest({
+      method: opcoes.method || 'GET', url, timeout: 12000, headers: opcoes.headers, data: opcoes.data,
+      onload: r => ok({ status: r.status, texto: r.responseText || '' }), onerror: () => erro(Error('sem conexão')), ontimeout: () => erro(Error('demorou demais')),
+    }));
+  }
+  function jsonDepois(html, marcador) {
+    const i = html.indexOf(marcador); if (i < 0) return null;
+    const ini = html.indexOf('{', i); if (ini < 0) return null;
+    let nivel = 0, dentroStr = false, esc = false;
+    for (let k = ini; k < html.length; k++) {
+      const c = html[k];
+      if (dentroStr) { if (esc) esc = false; else if (c === '\\') esc = true; else if (c === '"') dentroStr = false; continue; }
+      if (c === '"') dentroStr = true; else if (c === '{') nivel++; else if (c === '}') { nivel--; if (!nivel) { try { return JSON.parse(html.slice(ini, k + 1)); } catch { return null; } } }
+    }
+    return null;
+  }
+  function coletar(o, chave, out = []) {
+    if (Array.isArray(o)) o.forEach(v => coletar(v, chave, out));
+    else if (o && typeof o === 'object') for (const [k, v] of Object.entries(o)) { if (k === chave) out.push(v); coletar(v, chave, out); }
+    return out;
+  }
+  async function lerTranscricao(id) {
+    const cache = GM_getValue('fala:' + id, '');
+    if (cache) return { texto: cache, metodo: 'guardada' };
+    const pagina = await pedirTexto('https://www.youtube.com/watch?v=' + id + '&hl=pt-BR');
+    const html = pagina.texto;
+    // 1) faixa de legenda
+    const pr = jsonDepois(html, 'ytInitialPlayerResponse');
+    const faixas = pr?.captions?.playerCaptionsTracklistRenderer?.captionTracks || [];
+    const faixa = faixas.find(f => /^pt/.test(f.languageCode) && f.kind !== 'asr') || faixas.find(f => /^pt/.test(f.languageCode)) || faixas[0];
+    let texto = '', metodo = '';
+    if (faixa?.baseUrl) {
+      try {
+        const r = await pedirTexto(faixa.baseUrl + '&fmt=json3');
+        const j = JSON.parse(r.texto || '{}');
+        texto = (j.events || []).flatMap(e => (e.segs || []).map(x => x.utf8 || '')).join(' ').replace(/\s+/g, ' ').trim();
+        if (texto) metodo = 'faixa de legenda (' + (faixa.languageCode || '?') + (faixa.kind === 'asr' ? ', automática' : '') + ')';
+      } catch {}
+    }
+    // 2) painel "Mostrar transcrição"
+    if (!texto) {
+      const params = (html.match(/"getTranscriptEndpoint":\{"params":"([^"]+)"/) || [])[1];
+      const chave = (html.match(/"INNERTUBE_API_KEY":"([^"]+)"/) || [])[1];
+      const versao = (html.match(/"INNERTUBE_CLIENT_VERSION":"([^"]+)"/) || [])[1] || '2.20261101.00.00';
+      if (params) {
+        const r = await pedirTexto('https://www.youtube.com/youtubei/v1/get_transcript' + (chave ? '?key=' + chave : ''), {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          data: JSON.stringify({ context: { client: { clientName: 'WEB', clientVersion: versao, hl: 'pt', gl: 'BR' } }, params }),
+        });
+        try {
+          const j = JSON.parse(r.texto || '{}');
+          texto = coletar(j, 'transcriptSegmentRenderer').map(seg => (seg.snippet?.runs || []).map(x => x.text).join('')).join(' ').replace(/\s+/g, ' ').trim();
+          if (texto) metodo = 'painel de transcrição';
+        } catch {}
+      }
+    }
+    if (!texto) throw Error(faixas.length ? 'a legenda existe mas o YouTube não entregou o texto' : 'o vídeo ainda não tem legenda (página ' + pagina.status + ')');
+    GM_setValue('fala:' + id, texto.slice(0, 60000));
+    return { texto, metodo };
+  }
+  function idDoVideo() {
+    const m = location.href.match(/\/video\/([A-Za-z0-9_-]{11})/) || location.href.match(/[?&]udvid=([A-Za-z0-9_-]{11})/);
+    if (m) return m[1];
+    const a = todos('a[href*="youtu.be/"], a[href*="watch?v="]').map(x => (x.href.match(/(?:youtu\.be\/|v=)([A-Za-z0-9_-]{11})/) || [])[1]).find(Boolean);
+    return a || null;
+  }
+
   function tituloOEmbed(id) {
     return new Promise((ok, erro) => {
       GM_xmlhttpRequest({
@@ -1139,12 +1272,13 @@
       d.citados && d.citados.length ? el('div', {}, el('b', {}, 'Citado no corte: '), ...etiquetas(d.citados)) : null,
       el('div', {}, el('b', {}, 'Convidado: '), ...(d.convidados.length ? etiquetas(d.convidados) : [el('i', {}, 'não identificado')])),
       el('div', {}, el('b', {}, 'Assunto: '), ...(d.temas.length ? etiquetas(d.temas) : [el('i', {}, 'não identificado')])),
-      d.palavras && d.palavras.length ? el('div', {}, el('b', {}, 'Palavras do título: '), ...etiquetas(d.palavras)) : null,
+      d.fala && d.fala.length ? el('div', {}, el('b', {}, 'Mais falado no corte: '), ...etiquetas(d.fala)) : null,
+      d.palavras && d.palavras.length ? el('div', {}, el('b', {}, 'Palavras usadas na busca: '), ...etiquetas(d.palavras)) : null,
       d.tituloEpisodio ? cinza('Episódio completo: ' + d.tituloEpisodio) : null,
       ...Object.entries(d.wiki || {}).map(([k, v]) => cinza('Wikipédia (' + k + '): ' + v.slice(0, 140) + '…'))].filter(Boolean));
   }
 
-  const ROTULO_ORIGEM = { citado: 'citado no corte', tema: 'assunto do corte', titulo: 'palavra do título', convidado: 'convidado', 'tema-ep': 'assunto do episódio', coringa: 'coringa' };
+  const ROTULO_ORIGEM = { citado: 'citado no corte', tema: 'assunto do corte', titulo: 'palavra do corte (título/fala)', convidado: 'convidado', 'tema-ep': 'assunto do episódio', coringa: 'coringa' };
 
   function mostrarSugestoes(candidatos, faltam, jaTem) {
     const box = limpar(document.getElementById('pf-conf'));
