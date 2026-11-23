@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Produtos Flow — marcar produtos no YouTube Studio
 // @namespace    produtos-flow.cortes
-// @version      1.13.3
+// @version      1.13.4
 // @description  Escolhe produtos ligados ao convidado e ao assunto do corte, marca no Studio, distribui os tempos e PARA para conferência humana. Não salva nada sozinho. Sem IA.
 // @match        https://studio.youtube.com/*
 // @grant        GM_xmlhttpRequest
@@ -32,7 +32,7 @@
 
 (function () {
   'use strict';
-  const VERSAO = '1.13.3';
+  const VERSAO = '1.13.4';
 
   // ====================================================================================
   //  LISTAS — para acrescentar convidado ou tema, copie um bloco e troque os textos.
@@ -67,6 +67,10 @@
   // buscas: o que digitar na busca de produtos | exige: o nome do produto precisa ter
   // pelo menos UMA destas palavras | temas: assuntos ligados (ajudam a completar)
   const CONVIDADOS = [
+    // convidados cujo produto é o que eles fazem (não livro com o nome deles): produtos = buscas genéricas,
+    // entram logo depois dos livros citados e podem ocupar até 4 vagas
+    { nome: 'Vinheteiro', apelidos: ['lord vinheteiro', 'vinheteiro'], buscas: ['Teclado Yamaha', 'Piano digital', 'Teclado Casio', 'Suporte para teclado', 'Banco para piano', 'Partituras piano'], exige: ['vinheteiro'], exigePorBusca: true, produtoProprio: true, temas: ['musica'] },
+    { nome: 'Registrador', apelidos: ['registrador'], buscas: ['Disco de vinil', 'Toca-discos vitrola', 'Vitrola toca discos bluetooth', 'Limpador de disco de vinil'], exige: ['registrador'], exigePorBusca: true, produtoProprio: true, temas: ['musica'] },
     { nome: 'Edu Falaschi', apelidos: ['edu falaschi', 'falaschi'], buscas: ['Edu Falaschi', 'Edu Falaschi CD', 'Edu Falaschi vinil', 'Angra CD', 'Angra vinil', 'Angra camiseta'], exige: ['edu falaschi', 'falaschi', 'angra'], temas: ['musica'] },
     { nome: 'Professor HOC', apelidos: ['professor hoc', 'prof hoc', 'hoc'], buscas: ['Professor HOC livro', 'Professor HOC'], exige: ['hoc'], temas: ['geopolitica', 'historia'] },
     { nome: 'Dilera', apelidos: ['dilera'], buscas: ['Dilera'], exige: ['dilera'], temas: ['saude-mental', 'comedia'] },
@@ -765,13 +769,13 @@
       }
       const buscasConv = [...c.buscas];
       if (c.desconhecido && det.temas.some(t => t.id === 'musica')) buscasConv.push(c.nome + ' CD', c.nome + ' vinil');
-      if (umaPalavra(c) && !chavesAssunto.length) continue; // sem assunto não dá para separar dos xarás
+      if (umaPalavra(c) && !chavesAssunto.length && !c.produtoProprio) continue; // sem assunto não dá para separar dos xarás
       for (const b of buscasConv) {
         // convidado extra: o produto precisa ter o nome dele OU todas as palavras da busca
         let exige = c.exigePorBusca && !tem(b, c.apelidos[0]) ? palavrasFortes(b).map(w => [w + '*']) : [c.exige];
         if (!exige.length) exige = [c.exige];
-        if (umaPalavra(c)) exige = [...exige, chavesAssunto];
-        fila.push({ busca: b, exige, recusa: umaPalavra(c) ? RECUSA_LIVRO : [], origem: 'convidado', rotulo: c.nome, chaves: c.apelidos });
+        if (umaPalavra(c) && !c.produtoProprio) exige = [...exige, chavesAssunto];
+        fila.push({ busca: b, exige, recusa: umaPalavra(c) && !c.produtoProprio ? RECUSA_LIVRO : ['capa', 'case', 'adesivo', 'capinha'], origem: c.produtoProprio ? 'convidado-produto' : 'convidado', rotulo: c.nome, chaves: c.apelidos });
       }
     }
     const listaCoringa = (coringas && coringas.length ? coringas : CORINGAS_PADRAO);
@@ -826,6 +830,8 @@
       };
       pega(achados.filter(p => p.origem === 'citado' && p.rotulo === 'assunto digitado'), alvo);
       pega(achados.filter(p => p.origem === 'citado' && p.rotulo === 'livro citado na fala'), alvo);
+      // convidado que É o produto (Vinheteiro → teclado/piano): até 4 vagas, logo no começo
+      pega(achados.filter(p => p.origem === 'convidado-produto'), Math.min(alvo, out.length + 4));
       pega(achados.filter(p => p.origem === 'fala'), alvo);      // o que o corte mais fala
       pega(achados.filter(p => p.origem === 'citado'), Math.min(alvo, out.length + 3));
       pega(achados.filter(p => p.origem === 'tema'), alvo);
@@ -1193,7 +1199,7 @@
       // para quando já há candidatos de sobra
       // já tem candidato de sobra: pula as listas fixas (assunto, convidado, coringa), mas sempre
       // busca o que veio da fala, do que foi citado e do título do corte
-      if (!['fala', 'citado', 'titulo'].includes(q.origem) && escolher(achados, faltam, recentes).length >= faltam && achados.length >= faltam + 3) continue;
+      if (!['fala', 'citado', 'titulo', 'convidado-produto'].includes(q.origem) && escolher(achados, faltam, recentes).length >= faltam && achados.length >= faltam + 3) continue;
       registrar('Buscando: ' + q.busca);
       const linhas = await buscar(painel, q.busca);
       let bons = 0;
@@ -1696,7 +1702,7 @@
       ...Object.entries(d.wiki || {}).map(([k, v]) => cinza('Wikipédia (' + k + '): ' + v.slice(0, 140) + '…'))].filter(Boolean));
   }
 
-  const ROTULO_ORIGEM = { fala: 'assunto falado no corte', citado: 'citado no corte', tema: 'assunto do corte', titulo: 'palavra do corte (título/fala)', convidado: 'convidado', 'tema-ep': 'assunto do episódio', coringa: 'coringa' };
+  const ROTULO_ORIGEM = { 'convidado-produto': 'do convidado', fala: 'assunto falado no corte', citado: 'citado no corte', tema: 'assunto do corte', titulo: 'palavra do corte (título/fala)', convidado: 'convidado', 'tema-ep': 'assunto do episódio', coringa: 'coringa' };
 
   function mostrarSugestoes(candidatos, faltam, jaTem) {
     const box = limpar(document.getElementById('pf-conf'));
