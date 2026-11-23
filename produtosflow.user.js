@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Produtos Flow — marcar produtos no YouTube Studio
 // @namespace    produtos-flow.cortes
-// @version      1.13.0
+// @version      1.13.1
 // @description  Escolhe produtos ligados ao convidado e ao assunto do corte, marca no Studio, distribui os tempos e PARA para conferência humana. Não salva nada sozinho. Sem IA.
 // @match        https://studio.youtube.com/*
 // @grant        GM_xmlhttpRequest
@@ -32,7 +32,7 @@
 
 (function () {
   'use strict';
-  const VERSAO = '1.13.0';
+  const VERSAO = '1.13.1';
 
   // ====================================================================================
   //  LISTAS — para acrescentar convidado ou tema, copie um bloco e troque os textos.
@@ -318,7 +318,8 @@
     { chaves: ['bitcoin', 'cripto*', 'blockchain'], buscas: [['Livro bitcoin', [['bitcoin', 'cripto*']]]] },
     { chaves: ['china', 'chines*', 'xi jinping'], buscas: [['Livro China', [['livro'], ['china', 'chines*']]]] },
     { chaves: ['russia', 'putin', 'ucrania'], buscas: [['Livro Rússia Putin', [['livro'], ['russia', 'putin']]]] },
-    { chaves: ['israel', 'palestin*', 'gaza', 'hamas', 'oriente medio'], buscas: [['Livro Oriente Médio', [['livro'], ['oriente medio', 'israel', 'palestin*']]]] },
+    { chaves: ['judeu*', 'judia*', 'judaismo', 'judaic*', 'sionis*', 'holocausto', 'antissemit*', 'antisemit*'], buscas: [['Livro história do povo judeu', [['livro'], ['judeu*', 'judaismo', 'judaic*', 'judia*']]], ['Livro sionismo', [['livro'], ['sionis*']]], ['O Diário de Anne Frank', [['anne frank']]]] },
+    { chaves: ['israel', 'palestin*', 'gaza', 'hamas', 'oriente medio'], buscas: [['Livro Oriente Médio', [['livro'], ['oriente medio', 'israel', 'palestin*']]], ['Livro Palestina', [['livro'], ['palestin*', 'gaza']]]] },
     { chaves: ['estados unidos', 'eua', 'trump', 'americano*'], buscas: [['Livro Estados Unidos história', [['livro'], ['estados unidos', 'america*']]]] },
     { chaves: ['escola*', 'educacao', 'professor*', 'ensino', 'universidade*', 'faculdade*'], buscas: [['Livro educação no Brasil', [['livro'], ['educac*', 'ensino', 'escola']]]] },
     { chaves: ['ansiedade', 'depressao', 'terapia', 'psicolog*', 'saude mental', 'burnout'], buscas: [['Livro ansiedade', [['livro'], ['ansiedade', 'mente', 'emoc*']]]] },
@@ -484,6 +485,13 @@
       if (apelido) buscas.push(titulo1(apelido) + ' livro', titulo1(apelido));
       convidados.push({ nome: titulo1(nomeEp) + (apelido ? ' (' + titulo1(apelido) + ')' : ''), apelidos: [n, ...(apelido ? [norm(apelido)] : [])], buscas, exige: [n, ...(apelido ? [norm(apelido)] : [])], temas: [], pontos: noCorte ? 3 : 1, desconhecido: true });
     }
+    // convidado tirado do PRÓPRIO CORTE: "NOME SOBRENOME: ..." no título e/ou "vou conversar com o Fulano de Tal" na fala
+    for (const nomeCorte of nomesNoCorte(titulo, transcricao)) {
+      const n = norm(nomeCorte.nome);
+      if (convidados.some(c => temAlgum(n, c.apelidos) || temAlgum(c.nome, [n]))) continue;
+      const apelidos = [...new Set([n, ...nomeCorte.outros.map(norm)])];
+      convidados.push({ nome: nomeCorte.nome, apelidos, buscas: [nomeCorte.nome + ' livro', nomeCorte.nome], exige: apelidos, temas: [], pontos: 4, desconhecido: true });
+    }
     // pessoas famosas citadas no título do corte
     const citados = CITADOS.filter(c => temAlgum(titulo, c.apelidos) && !convidados.some(g => temAlgum(g.nome, c.apelidos)));
     convidados.sort((a, b) => b.pontos - a.pontos);
@@ -512,9 +520,32 @@
     // palavras que aparecem no título E na fala vêm primeiro; depois as mais faladas; depois as do título
     const ambos = doTitulo.filter(w => fala.some(f => f.startsWith(w.slice(0, 5))));
     const palavras = [...new Set([...ambos, ...fala.slice(0, 3), ...doTitulo])].slice(0, 4);
-    return { citados, convidados: convidados.slice(0, 4), temas: temasFinais, palavras, fala, livros: segs ? livrosCitados(semPropaganda(segs)) : [], assuntos: segs ? assuntosDaFala(segs) : [] };
+    return { citados, convidados: convidados.slice(0, 4), temas: temasFinais, palavras, fala, livros: segs ? livrosCitados(semPropaganda(segs)) : [], assuntos: segs ? assuntosDaFala(segs) : [], falaTexto: transcricao || '' };
   }
 
+  // Nome do convidado dentro do corte. Título no formato "BRENO ALTMAN: um judeu diferente" (aceito só se o
+  // nome aparecer com letra maiúscula na fala, para não confundir com "GUERRA NUCLEAR:") e a apresentação
+  // na fala ("hoje eu vou conversar com o Breno Altman"). A grafia da fala vale mais que a do título.
+  const MAIUSC = 'A-ZÀ-ÖØ-Þ', MINUSC = 'a-zß-öø-ÿ';
+  function nomesNoCorte(titulo, fala) {
+    const out = [];
+    const palavraNome = w => w.length >= 3 && !VAZIAS.has(norm(w)) && !FALA_VAZIAS.has(norm(w)) && !FRACAS.includes(norm(w));
+    let doTitulo = null;
+    const mt = new RegExp('^\\s*([' + MAIUSC + '][' + MAIUSC + MINUSC + ']+(?:\\s+[' + MAIUSC + '][' + MAIUSC + MINUSC + ']+){1,2})\\s*[:|–-]').exec(titulo || '');
+    if (mt && mt[1].split(/\s+/).every(palavraNome)) doTitulo = titulo1(mt[1]);
+    let daFala = null;
+    if (fala) {
+      const inicio = fala.slice(0, Math.max(1500, Math.floor(fala.length * 0.25)));
+      const nome = '([' + MAIUSC + '][' + MINUSC + ']+(?:\\s+(?:de |da |do |dos |das )?[' + MAIUSC + '][' + MINUSC + ']+){1,3})';
+      const mf = new RegExp('\\b(?:conversar com|conversando com|conversa com|recebendo|receber|entrevistar|entrevistando|papo com|nosso convidado(?: de hoje)?(?: é)?|minha convidada(?: de hoje)?(?: é)?|meu convidado(?: de hoje)?(?: é)?)\\s+(?:o |a |os |as )?' + nome).exec(inicio);
+      if (mf && mf[1].split(/\s+/).filter(w => !/^(de|da|do|dos|das)$/.test(w)).every(palavraNome)) daFala = mf[1];
+      // nome do título só vale se o primeiro nome aparecer com maiúscula na fala
+      if (doTitulo && !new RegExp('\\b' + doTitulo.split(' ')[0] + '\\b').test(fala)) doTitulo = null;
+    }
+    if (daFala && doTitulo && norm(daFala).split(' ')[0] === norm(doTitulo).split(' ')[0]) out.push({ nome: daFala, outros: norm(daFala) === norm(doTitulo) ? [] : [doTitulo] });
+    else { if (daFala) out.push({ nome: daFala, outros: [] }); if (doTitulo) out.push({ nome: doTitulo, outros: [] }); }
+    return out;
+  }
   // quantas vezes os termos aparecem no texto (termo com * = começa com)
   function frequencia(texto, termos) {
     const t = ' ' + norm(texto) + ' ';
@@ -608,7 +639,7 @@
 
   // Palavras "de assunto" do título do corte: tira artigos, verbos de chamada ("revela", "quebrou"),
   // adjetivos de clique ("obscura", "bizarro"), risadas e nomes de pessoas. O que sobra vira busca.
-  const VAZIAS = new Set(('a o os as e e de da do das dos em no na nos nas num numa um uma uns umas que com sem por para pra pro pros sobre ' +
+  const VAZIAS = new Set(('diferente diferentes normal normais a o os as e e de da do das dos em no na nos nas num numa um uma uns umas que com sem por para pra pro pros sobre ' +
     'ser foi era sao tem ter vai vao ja muito muita mais menos como quando onde porque qual quais quem esse essa esses essas isso este esta isto ' +
     'aquele aquela ele ela eles elas voce voces vc seu sua seus suas meu minha nosso nossa nao sim so tudo nada todo toda todos todas aqui ali la ' +
     'agora hoje ontem depois antes ate entre contra desde cada outro outra mesmo mesma ainda tambem sempre nunca vez vezes coisa coisas gente cara ' +
@@ -678,12 +709,14 @@
     // a lista fixa de cada assunto gira conforme o corte, para não sair sempre a mesma ordem
     const girar = lista => { const k = lista.length ? (det.semente || 0) % lista.length : 0; return [...lista.slice(k), ...lista.slice(0, k)]; };
     const chavesDaBusca = b => palavrasFortes(b).map(w => w.length > 4 ? w.slice(0, w.length - 1) + '*' : w);
+    // com a fala do corte em mãos, da lista fixa do assunto só entra o que foi falado (nada de "Terço" num papo sobre judaísmo)
+    const falada = b => !det.falaTexto || frequencia(det.falaTexto, chavesDaBusca(b)) > 0;
     for (const c of det.citados || []) {
       for (const b of c.buscas) fila.push({ busca: b, exige: [c.exige], recusa: [], origem: 'citado', rotulo: c.nome, chaves: c.apelidos });
     }
     // o ASSUNTO DO CORTE vem antes do convidado
     for (const t of det.temas.filter(t => t.doCorte)) {
-      for (const [b, exige, recusa] of girar(TEMAS[t.id].buscas)) {
+      for (const [b, exige, recusa] of girar(TEMAS[t.id].buscas).filter(([b]) => falada(b))) {
         fila.push({ busca: b, exige: semLivro(exige), recusa: [...(recusa || []), ...(ehBuscaDeLivro(b) || exige.some(g => g.includes('livro')) ? RECUSA_LIVRO : [])], origem: 'tema', rotulo: t.nome, chaves: chavesDaBusca(b) });
       }
     }
@@ -694,7 +727,7 @@
       fila.push({ busca: w, exige: ex, recusa: ['adesivo', 'capinha', 'case', 'pelicula'], origem: 'titulo', rotulo: 'título do corte', chaves: [w] });
     }
     for (const t of det.temas.filter(t => !t.doCorte)) {
-      for (const [b, exige, recusa] of girar(TEMAS[t.id].buscas)) {
+      for (const [b, exige, recusa] of girar(TEMAS[t.id].buscas).filter(([b]) => falada(b))) {
         fila.push({ busca: b, exige: semLivro(exige), recusa: [...(recusa || []), ...(ehBuscaDeLivro(b) || exige.some(g => g.includes('livro')) ? RECUSA_LIVRO : [])], origem: 'tema-ep', rotulo: t.nome, chaves: chavesDaBusca(b) });
       }
     }
@@ -856,7 +889,7 @@
   const mmss = s => Math.floor(s / 60) + ':' + String(Math.floor(s % 60)).padStart(2, '0');
 
   if (typeof module !== 'undefined' && module.exports) {
-    module.exports = { planoPorFala, assuntosDaFala, expressoesDaFala, semPropaganda, MAPA_FALA, livrosCitados, momentoNaFala, atribuirTrechos, palavrasDaFala, frequencia, palavrasDoTitulo, produtosParaCobrir, cobertura, ehPessoa, repetido, CITADOS, CORINGAS_PADRAO, norm, tem, detectar, planoDeBuscas, aceita, escolher, planoDeTempos, linkEpisodio, nomeDoEpisodio, nomesDoEpisodio, titulo1, limparDescricao, lerExtras, CONVIDADOS, TEMAS, INDISPONIVEL };
+    module.exports = { nomesNoCorte, planoPorFala, assuntosDaFala, expressoesDaFala, semPropaganda, MAPA_FALA, livrosCitados, momentoNaFala, atribuirTrechos, palavrasDaFala, frequencia, palavrasDoTitulo, produtosParaCobrir, cobertura, ehPessoa, repetido, CITADOS, CORINGAS_PADRAO, norm, tem, detectar, planoDeBuscas, aceita, escolher, planoDeTempos, linkEpisodio, nomeDoEpisodio, nomesDoEpisodio, titulo1, limparDescricao, lerExtras, CONVIDADOS, TEMAS, INDISPONIVEL };
     return;
   }
 
@@ -1055,7 +1088,7 @@
     }
     // convidado que não está na lista: procura a profissão dele na Wikipédia (sem IA)
     // fala do corte (legenda automática) → assuntos centrais
-    let transcricao = '', segs = null;
+    let transcricao = '', segs = null, motivoLegenda = '';
     const idVideo = idDoVideo();
     if (idVideo) {
       registrar('Lendo a legenda do corte (pode levar até 1 minuto; não abre aba nova)…');
@@ -1068,11 +1101,12 @@
         registrar('Legenda lida pelo Studio: ' + segs.length + ' frases, ' + transcricao.split(' ').length + ' palavras.');
       } catch (e) {
         if (parar) throw Error('Parado por você.');
+        motivoLegenda = e.message;
         registrar('Legenda pelo Studio: ' + e.message + '.');
         try { const r = await lerTranscricao(idVideo); transcricao = r.texto; registrar('Legenda lida (' + r.metodo + ').'); }
         catch (e2) { registrar('Sem legenda: ' + e2.message + '. Sigo pelo título.'); }
       }
-    } else registrar('Não achei o código do vídeo para ler a legenda.');
+    } else { motivoLegenda = 'não achei o código do vídeo'; registrar('Não achei o código do vídeo para ler a legenda.'); }
     ultimasFrases = segs;
     const det0 = detectar({ titulo, descricao, tags, tituloEpisodio, extras: cfg.extras, transcricao });
     const wiki = {};
@@ -1087,7 +1121,7 @@
     if (det.livros && det.livros.length) registrar('Livros citados na fala: ' + det.livros.map(l => l.titulo + ' (' + mmss(l.tempo) + ')').join('; '));
     det.dicas = dicas;
     if (det.fala && det.fala.length) registrar('Mais falado no corte: ' + det.fala.join(', '));
-    ultimaDeteccao = { livros: (det.livros || []).map(l => l.titulo), fala: det.fala || [], palavras: det.palavras || [], titulo, tituloEpisodio, idEpisodio: idEp, tags: tags.slice(0, 15), citados: (det.citados || []).map(c => c.nome), convidados: det.convidados.map(c => c.nome + (c.desconhecido ? ' (do episódio)' : '')), temas: det.temas.map(t => t.nome + ' (' + t.pontos + ')'), wiki: Object.fromEntries(Object.entries(wiki).map(([k, v]) => [k, v.slice(0, 160)])) };
+    ultimaDeteccao = { legenda: segs ? 'lida (' + segs.length + ' frases)' : (motivoLegenda ? 'não lida — ' + motivoLegenda : ''), assuntos: (det.assuntos || []).map(a => a.buscas[0][0].replace(/^Livro /i, '') + (Number.isFinite(a.tempo) ? ' (' + mmss(a.tempo) + ')' : '')), livros: (det.livros || []).map(l => l.titulo), fala: det.fala || [], palavras: det.palavras || [], titulo, tituloEpisodio, idEpisodio: idEp, tags: tags.slice(0, 15), citados: (det.citados || []).map(c => c.nome), convidados: det.convidados.map(c => c.nome + (c.desconhecido ? ' (do episódio)' : '')), temas: det.temas.map(t => t.nome + ' (' + t.pontos + ')'), wiki: Object.fromEntries(Object.entries(wiki).map(([k, v]) => [k, v.slice(0, 160)])) };
     registrar('Citado no corte: ' + ((det.citados || []).map(c => c.nome).join(', ') || '—') + ' | Convidado: ' + (det.convidados.map(c => c.nome).join(', ') || 'não identificado') + ' | Assunto: ' + (det.temas.map(t => t.nome).join(', ') || 'não identificado'));
     mostrarDeteccao();
 
@@ -1603,6 +1637,8 @@
       d.citados && d.citados.length ? el('div', {}, el('b', {}, 'Citado no corte: '), ...etiquetas(d.citados)) : null,
       el('div', {}, el('b', {}, 'Convidado: '), ...(d.convidados.length ? etiquetas(d.convidados) : [el('i', {}, 'não identificado')])),
       el('div', {}, el('b', {}, 'Assunto: '), ...(d.temas.length ? etiquetas(d.temas) : [el('i', {}, 'não identificado')])),
+      el('div', {}, el('b', {}, 'Legenda do corte: '), d.legenda ? el('span', {}, d.legenda) : el('i', {}, 'não lida')),
+      d.assuntos && d.assuntos.length ? el('div', {}, el('b', {}, 'Assuntos da fala: '), ...etiquetas(d.assuntos)) : null,
       d.livros && d.livros.length ? el('div', {}, el('b', {}, 'Livros citados: '), ...etiquetas(d.livros)) : null,
       d.fala && d.fala.length ? el('div', {}, el('b', {}, 'Mais falado no corte: '), ...etiquetas(d.fala)) : null,
       d.palavras && d.palavras.length ? el('div', {}, el('b', {}, 'Palavras usadas na busca: '), ...etiquetas(d.palavras)) : null,
