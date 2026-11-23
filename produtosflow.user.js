@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Produtos Flow — marcar produtos no YouTube Studio
 // @namespace    produtos-flow.cortes
-// @version      1.13.4
+// @version      1.13.5
 // @description  Escolhe produtos ligados ao convidado e ao assunto do corte, marca no Studio, distribui os tempos e PARA para conferência humana. Não salva nada sozinho. Sem IA.
 // @match        https://studio.youtube.com/*
 // @grant        GM_xmlhttpRequest
@@ -32,7 +32,7 @@
 
 (function () {
   'use strict';
-  const VERSAO = '1.13.4';
+  const VERSAO = '1.13.5';
 
   // ====================================================================================
   //  LISTAS — para acrescentar convidado ou tema, copie um bloco e troque os textos.
@@ -70,7 +70,8 @@
     // convidados cujo produto é o que eles fazem (não livro com o nome deles): produtos = buscas genéricas,
     // entram logo depois dos livros citados e podem ocupar até 4 vagas
     { nome: 'Vinheteiro', apelidos: ['lord vinheteiro', 'vinheteiro'], buscas: ['Teclado Yamaha', 'Piano digital', 'Teclado Casio', 'Suporte para teclado', 'Banco para piano', 'Partituras piano'], exige: ['vinheteiro'], exigePorBusca: true, produtoProprio: true, temas: ['musica'] },
-    { nome: 'Registrador', apelidos: ['registrador'], buscas: ['Disco de vinil', 'Toca-discos vitrola', 'Vitrola toca discos bluetooth', 'Limpador de disco de vinil'], exige: ['registrador'], exigePorBusca: true, produtoProprio: true, temas: ['musica'] },
+    // Regis Tadeu, crítico musical (a legenda automática às vezes escreve "registrador")
+    { nome: 'Regis Tadeu', apelidos: ['regis tadeu', 'registrador', 'regis'], buscas: ['Regis Tadeu livro', 'Livro história do rock', 'Disco de vinil rock', 'Toca-discos vitrola', 'Livro biografia rock', 'Fone de ouvido'], exige: ['regis tadeu'], exigePorBusca: true, produtoProprio: true, temas: ['musica'] },
     { nome: 'Edu Falaschi', apelidos: ['edu falaschi', 'falaschi'], buscas: ['Edu Falaschi', 'Edu Falaschi CD', 'Edu Falaschi vinil', 'Angra CD', 'Angra vinil', 'Angra camiseta'], exige: ['edu falaschi', 'falaschi', 'angra'], temas: ['musica'] },
     { nome: 'Professor HOC', apelidos: ['professor hoc', 'prof hoc', 'hoc'], buscas: ['Professor HOC livro', 'Professor HOC'], exige: ['hoc'], temas: ['geopolitica', 'historia'] },
     { nome: 'Dilera', apelidos: ['dilera'], buscas: ['Dilera'], exige: ['dilera'], temas: ['saude-mental', 'comedia'] },
