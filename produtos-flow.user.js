@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Produtos Flow — marcar produtos no YouTube Studio
 // @namespace    produtos-flow.cortes
-// @version      1.12.1
+// @version      1.13.0
 // @description  Escolhe produtos ligados ao convidado e ao assunto do corte, marca no Studio, distribui os tempos e PARA para conferência humana. Não salva nada sozinho. Sem IA.
 // @match        https://studio.youtube.com/*
 // @grant        GM_xmlhttpRequest
@@ -32,7 +32,7 @@
 
 (function () {
   'use strict';
-  const VERSAO = '1.12.1';
+  const VERSAO = '1.13.0';
 
   // ====================================================================================
   //  LISTAS — para acrescentar convidado ou tema, copie um bloco e troque os textos.
@@ -294,6 +294,86 @@
   // ter todas as palavras principais da busca.
   const CORINGAS_PADRAO = ['Hábitos Atômicos', 'A Psicologia Financeira', 'Mais Esperto que o Diabo', 'Microfone podcast', 'Fone de ouvido bluetooth', 'Kindle'];
 
+  // ASSUNTOS DA FALA: o que a legenda do corte repete vira busca, cada uma com o momento em que é falado.
+  // chaves = palavras que contam na fala (com * = começa com); buscas = [texto, palavras exigidas no produto].
+  // Só entra o que for falado pelo menos 2 vezes; o mais falado vem primeiro.
+  const MAPA_FALA = [
+    { chaves: ['impost*', 'tribut*', 'carga tributaria', 'receita federal', 'sonega*'], buscas: [['Livro sistema tributário brasileiro', [['livro'], ['tribut*', 'imposto*']]], ['Livro planejamento tributário', [['livro'], ['tribut*']]]] },
+    { chaves: ['divida*', 'endivid*', 'calote*', 'credito', 'juros', 'emprestimo*'], buscas: [['Livro como sair das dívidas', [['livro'], ['divida*', 'endivid*', 'financ*']]], ['Livro finanças pessoais', [['livro'], ['financ*']]]] },
+    { chaves: ['empresari*', 'microempres*', 'pequena* empresa*', 'pme', 'empreend*', 'padaria*', 'comercio', 'dono de'], buscas: [['Livro gestão de pequenas empresas', [['livro'], ['empresa*', 'gestao', 'negocio*']]], ['Livro empreendedorismo', [['livro'], ['empreend*', 'negocio*', 'empresa*']]]] },
+    { chaves: ['fluxo de caixa', 'caixa da empresa', 'contabil*', 'contador*', 'balanco'], buscas: [['Livro fluxo de caixa', [['livro'], ['caixa', 'financ*', 'contab*']]]] },
+    { chaves: ['mercado de capita*', 'equity', 'acoes', 'bolsa de valores', 'investiment*', 'investidor*', 'socio*'], buscas: [['Livro mercado de capitais', [['livro'], ['capitais', 'investiment*', 'acoes', 'bolsa']]], ['O Investidor Inteligente', [['investidor inteligente']]]] },
+    { chaves: ['recuperacao judicial', 'falencia', 'falir', 'quebrando', 'quebrou', 'faliu'], buscas: [['Livro recuperação judicial e falência', [['livro', 'manual', 'curso'], ['recuperacao', 'falencia']]]] },
+    { chaves: ['projeto* de lei', 'legisla*', 'deputad*', 'senado', 'senador*', 'camara dos deputados', 'congresso', 'votacao'], buscas: [['Livro processo legislativo', [['livro'], ['legislativ*', 'congresso', 'parlament*']]], ['Livro como funciona o Congresso', [['livro'], ['congresso', 'parlament*', 'legislativ*']]]] },
+    { chaves: ['6x1', '6 por 1', '6 por1', 'seis por um', 'escala*', 'jornada*', 'clt', 'carteira assinada', 'trabalhador*', 'funcionario*', 'salario*'], buscas: [['CLT Consolidação das Leis do Trabalho', [['clt', 'consolidacao das leis do trabalho']]], ['Livro direito do trabalho', [['livro', 'manual', 'curso'], ['trabalh*']]]] },
+    { chaves: ['luta de classes', 'marx*', 'comunis*', 'socialis*', 'proletari*', 'burgues*', 'mais-valia', 'mais valia'], buscas: [['O Capital Karl Marx', [['capital'], ['marx']]], ['Manifesto Comunista', [['manifesto'], ['comunista']]]] },
+    { chaves: ['liberal*', 'libertari*', 'livre mercado', 'capitalis*', 'mises', 'hayek', 'privatiza*'], buscas: [['As Seis Lições Mises', [['seis licoes', 'mises']]], ['O Caminho da Servidão', [['caminho da servidao']]]] },
+    { chaves: ['estado brasileiro', 'burocra*', 'funcionalismo', 'concursad*', 'estatal', 'estatais', 'servidor* publico*'], buscas: [['Os Donos do Poder Raymundo Faoro', [['donos do poder']]], ['Livro burocracia no Brasil', [['livro'], ['burocra*', 'estado']]]] },
+    { chaves: ['corrup*', 'licitac*', 'propina*', 'desvio*', 'lava jato', 'mensalao'], buscas: [['Livro corrupção no Brasil', [['livro'], ['corrup*', 'lava jato', 'propina']]]] },
+    { chaves: ['regular a internet', 'regulacao', 'regulamenta*', 'censura*', 'liberdade de expressao', 'fake news', 'pl 2630'], buscas: [['Livro liberdade de expressão', [['livro'], ['liberdade', 'expressao', 'censura']]]] },
+    { chaves: ['transito', 'mobilidade', 'transporte publico', 'onibus', 'metro', 'cidade* brasileira*', 'urbanism*'], buscas: [['Livro mobilidade urbana', [['livro'], ['mobilidade', 'urban*', 'cidade*', 'transito']]]] },
+    { chaves: ['populis*', 'demagog*', 'totalitar*', 'propaganda politica'], buscas: [['Livro A Revolução dos Bichos', [['revolucao dos bichos']]], ['Livro 1984 George Orwell', [['1984'], ['orwell']]]] },
+    { chaves: ['democracia', 'ditadura', 'autoritar*', 'golpe*', 'eleic*'], buscas: [['Como as Democracias Morrem', [['democracias morrem']]]] },
+    { chaves: ['inflacao', 'banco central', 'taxa selic', 'selic', 'pib', 'recessao', 'economia brasileira'], buscas: [['Livro economia brasileira', [['livro'], ['economia', 'economic*']]], ['Economia Numa Única Lição', [['unica licao']]]] },
+    { chaves: ['bitcoin', 'cripto*', 'blockchain'], buscas: [['Livro bitcoin', [['bitcoin', 'cripto*']]]] },
+    { chaves: ['china', 'chines*', 'xi jinping'], buscas: [['Livro China', [['livro'], ['china', 'chines*']]]] },
+    { chaves: ['russia', 'putin', 'ucrania'], buscas: [['Livro Rússia Putin', [['livro'], ['russia', 'putin']]]] },
+    { chaves: ['israel', 'palestin*', 'gaza', 'hamas', 'oriente medio'], buscas: [['Livro Oriente Médio', [['livro'], ['oriente medio', 'israel', 'palestin*']]]] },
+    { chaves: ['estados unidos', 'eua', 'trump', 'americano*'], buscas: [['Livro Estados Unidos história', [['livro'], ['estados unidos', 'america*']]]] },
+    { chaves: ['escola*', 'educacao', 'professor*', 'ensino', 'universidade*', 'faculdade*'], buscas: [['Livro educação no Brasil', [['livro'], ['educac*', 'ensino', 'escola']]]] },
+    { chaves: ['ansiedade', 'depressao', 'terapia', 'psicolog*', 'saude mental', 'burnout'], buscas: [['Livro ansiedade', [['livro'], ['ansiedade', 'mente', 'emoc*']]]] },
+    { chaves: ['filosof*', 'nietzsche', 'platao', 'aristoteles', 'socrates', 'estoic*', 'seneca'], buscas: [['Livro filosofia', [['livro'], ['filosof*', 'estoic*']]], ['Meditações Marco Aurélio', [['meditacoes'], ['marco aurelio']]]] },
+    { chaves: ['biblia', 'deus', 'igreja*', 'jesus', 'fe crista'], buscas: [['Bíblia Sagrada', [['biblia']]]] },
+    { chaves: ['celular*', 'redes sociais', 'rede social', 'tiktok', 'instagram', 'vicio em tela', 'dopamina'], buscas: [['Livro Nação Dopamina', [['dopamina']]], ['Livro vício em redes sociais', [['livro'], ['redes sociais', 'digital', 'celular']]]] },
+    { chaves: ['inteligencia artificial', 'chatgpt', 'robo*', 'automacao'], buscas: [['Livro inteligência artificial', [['livro'], ['inteligencia artificial', 'ia']]]] },
+    { chaves: ['games', 'videogame*', 'playstation', 'xbox', 'nintendo', 'jogar'], buscas: [['Controle PS5 DualSense', [['dualsense', 'controle']]], ['Headset gamer', [['headset']]]] },
+    { chaves: ['academia', 'treino*', 'musculacao', 'dieta*', 'whey', 'creatina'], buscas: [['Creatina', [['creatina']]], ['Whey protein', [['whey']]]] },
+    { chaves: ['guerra mundial', 'nazis*', 'hitler', 'segunda guerra'], buscas: [['Livro Segunda Guerra Mundial', [['livro'], ['segunda guerra', 'guerra mundial']]]] },
+    { chaves: ['crime*', 'faccao', 'faccoes', 'pcc', 'comando vermelho', 'trafic*', 'seguranca publica'], buscas: [['Livro crime organizado', [['livro'], ['crime', 'faccao', 'pcc', 'trafico']]]] },
+  ];
+  // Trecho de propaganda no fim do corte ("acessa esse QR code", "cupom") não conta como assunto.
+  function semPropaganda(segs) {
+    if (!segs || !segs.length) return segs || [];
+    const fim = segs[segs.length - 1].ini || 0;
+    const corte = segs.findIndex(sg => sg.ini >= fim * 0.8 && /\b(qr ?code|cupom|link na descri|patrocin|parceir[oa] do (canal|flow)|acesse|acessa esse)\b/i.test(sg.texto));
+    return corte > 0 ? segs.slice(0, Math.max(1, corte - 1)) : segs;
+  }
+  const FRASE_VAZIAS = new Set(('pela pelo pelas pelos modo geral area dela dele deles delas toda todo vez vezes jeito forma fala falar ' +
+    'sobre assim aqui isso essa esse cara caras irmao velho mano galera tipo onde quando porque entao mesmo mesma deus ceu').split(' '));
+  // Expressões repetidas na fala ("mercado de capitais", "recuperação judicial"), sem dicionário.
+  function expressoesDaFala(texto) {
+    const ws = norm(texto).split(' ');
+    const cont = new Map();
+    const forte = w => w && w.length >= 4 && !/\d/.test(w) && !VAZIAS.has(w) && !FALA_VAZIAS.has(w) && !FRASE_VAZIAS.has(w);
+    for (let i = 0; i < ws.length - 1; i++) {
+      const a = ws[i];
+      if (!forte(a)) continue;
+      let k = null;
+      if (forte(ws[i + 1])) k = a + ' ' + ws[i + 1];
+      else if (/^(de|da|do|dos|das)$/.test(ws[i + 1]) && forte(ws[i + 2])) k = a + ' ' + ws[i + 1] + ' ' + ws[i + 2];
+      if (k) cont.set(k, (cont.get(k) || 0) + 1);
+    }
+    return [...cont].filter(([, n]) => n >= 2).sort((x, y) => y[1] - x[1]).map(([k, n]) => ({ frase: k, n }));
+  }
+  function assuntosDaFala(segs) {
+    const limpos = semPropaganda(segs);
+    if (!limpos.length) return [];
+    const texto = limpos.map(x => x.texto).join(' ');
+    const out = [];
+    for (const e of MAPA_FALA) {
+      const n = frequencia(texto, e.chaves);
+      if (n >= 2) out.push({ n, buscas: e.buscas, chaves: e.chaves, tempo: momentoNaFala(limpos, e.chaves) });
+    }
+    out.sort((a, b) => b.n - a.n);
+    const cobertas = out.flatMap(o => o.chaves);
+    // expressões que nenhum item do dicionário cobre viram "livro <expressão>"
+    const extras = expressoesDaFala(texto).filter(x => !frequencia(x.frase, cobertas)).slice(0, 2).map(x => {
+      const fortes = palavrasFortes(x.frase);
+      return { n: x.n, chaves: [x.frase], tempo: momentoNaFala(limpos, [x.frase]), buscas: [['livro ' + x.frase, [['livro'], ...fortes.map(w => [w.length > 4 ? w.slice(0, w.length - 1) + '*' : w])]]] };
+    });
+    return [...out.slice(0, 8), ...extras];
+  }
+
   // ====================================================================================
   //  LÓGICA (sem IA: só comparação de palavras)
   // ====================================================================================
@@ -432,7 +512,7 @@
     // palavras que aparecem no título E na fala vêm primeiro; depois as mais faladas; depois as do título
     const ambos = doTitulo.filter(w => fala.some(f => f.startsWith(w.slice(0, 5))));
     const palavras = [...new Set([...ambos, ...fala.slice(0, 3), ...doTitulo])].slice(0, 4);
-    return { citados, convidados: convidados.slice(0, 4), temas: temasFinais, palavras, fala, livros: segs ? livrosCitados(segs) : [] };
+    return { citados, convidados: convidados.slice(0, 4), temas: temasFinais, palavras, fala, livros: segs ? livrosCitados(semPropaganda(segs)) : [], assuntos: segs ? assuntosDaFala(segs) : [] };
   }
 
   // quantas vezes os termos aparecem no texto (termo com * = começa com)
@@ -588,14 +668,23 @@
       if (fortes.length < 1) continue;
       fila.push({ busca: 'livro ' + l.titulo, exige: [[fortes[0].length > 4 ? fortes[0].slice(0, fortes[0].length - 1) + '*' : fortes[0]]], recusa: RECUSA_LIVRO, origem: 'citado', rotulo: 'livro citado na fala', chaves: fortes, tempo: l.tempo });
     }
+    // ASSUNTOS DA FALA: o que o corte mais repete, cada um com o momento em que é falado
+    for (const a of det.assuntos || []) {
+      for (const [b, exige, recusa] of a.buscas.slice(0, (det.assuntos.indexOf(a) < 2 && a.n >= 6) ? 2 : 1)) {
+        fila.push({ busca: b, exige: semLivro(exige), recusa: [...(recusa || []), ...(ehBuscaDeLivro(b) || exige.some(g => g.includes('livro')) ? RECUSA_LIVRO : [])], origem: 'fala', rotulo: 'assunto da fala', chaves: a.chaves, tempo: a.tempo });
+      }
+    }
     const chavesAssunto = det.temas.flatMap(t => TEMAS[t.id].chaves);
+    // a lista fixa de cada assunto gira conforme o corte, para não sair sempre a mesma ordem
+    const girar = lista => { const k = lista.length ? (det.semente || 0) % lista.length : 0; return [...lista.slice(k), ...lista.slice(0, k)]; };
+    const chavesDaBusca = b => palavrasFortes(b).map(w => w.length > 4 ? w.slice(0, w.length - 1) + '*' : w);
     for (const c of det.citados || []) {
       for (const b of c.buscas) fila.push({ busca: b, exige: [c.exige], recusa: [], origem: 'citado', rotulo: c.nome, chaves: c.apelidos });
     }
     // o ASSUNTO DO CORTE vem antes do convidado
     for (const t of det.temas.filter(t => t.doCorte)) {
-      for (const [b, exige, recusa] of TEMAS[t.id].buscas) {
-        fila.push({ busca: b, exige: semLivro(exige), recusa: [...(recusa || []), ...(ehBuscaDeLivro(b) || exige.some(g => g.includes('livro')) ? RECUSA_LIVRO : [])], origem: 'tema', rotulo: t.nome, chaves: TEMAS[t.id].chaves });
+      for (const [b, exige, recusa] of girar(TEMAS[t.id].buscas)) {
+        fila.push({ busca: b, exige: semLivro(exige), recusa: [...(recusa || []), ...(ehBuscaDeLivro(b) || exige.some(g => g.includes('livro')) ? RECUSA_LIVRO : [])], origem: 'tema', rotulo: t.nome, chaves: chavesDaBusca(b) });
       }
     }
     // palavras do título do corte (ex.: "trânsito", "lasanha", "6x1") — o assunto do corte manda
@@ -605,8 +694,8 @@
       fila.push({ busca: w, exige: ex, recusa: ['adesivo', 'capinha', 'case', 'pelicula'], origem: 'titulo', rotulo: 'título do corte', chaves: [w] });
     }
     for (const t of det.temas.filter(t => !t.doCorte)) {
-      for (const [b, exige, recusa] of TEMAS[t.id].buscas) {
-        fila.push({ busca: b, exige: semLivro(exige), recusa: [...(recusa || []), ...(ehBuscaDeLivro(b) || exige.some(g => g.includes('livro')) ? RECUSA_LIVRO : [])], origem: 'tema-ep', rotulo: t.nome, chaves: TEMAS[t.id].chaves });
+      for (const [b, exige, recusa] of girar(TEMAS[t.id].buscas)) {
+        fila.push({ busca: b, exige: semLivro(exige), recusa: [...(recusa || []), ...(ehBuscaDeLivro(b) || exige.some(g => g.includes('livro')) ? RECUSA_LIVRO : [])], origem: 'tema-ep', rotulo: t.nome, chaves: chavesDaBusca(b) });
       }
     }
     // convidado por último (antes dos coringas): no máximo 2 produtos
@@ -659,26 +748,36 @@
     return x.slice(0, k).join(' ') === y.slice(0, k).join(' ');
   }
 
-  // Ordem: pessoa citada no corte (até 3) → assunto do corte → palavras do título → assunto do episódio → convidado (até 2) → coringa.
+  // Ordem: assunto digitado → livro citado na fala → assuntos da fala → pessoa citada (até 3) → assunto do corte
+  // → palavras do título → assunto do episódio → convidado (até 2) → coringa.
   // Máximo 1 produto por busca (2 para o convidado) e nunca dois iguais.
-  function escolher(achados, alvo) {
+  // Produtos usados nos cortes recentes ficam para o fim: só entram se faltar produto.
+  function escolher(achados, alvo, recentes = []) {
     const out = [], porBusca = new Map();
-    const pega = (lista, teto) => {
-      for (const p of lista) {
-        if (out.length >= teto) break;
-        if (out.some(o => repetido(o.nome, p.nome))) continue;
-        if ((porBusca.get(p.busca) || 0) >= (p.origem === 'convidado' ? 2 : 1)) continue;
-        out.push(p); porBusca.set(p.busca, (porBusca.get(p.busca) || 0) + 1);
-      }
+    const usado = p => recentes.some(r => repetido(r, p.nome));
+    const rodada = (aceitaRecente) => {
+      const pega = (lista, teto) => {
+        for (const p of lista) {
+          if (out.length >= teto) break;
+          if (!aceitaRecente && usado(p)) continue;
+          if (out.some(o => repetido(o.nome, p.nome))) continue;
+          if ((porBusca.get(p.busca) || 0) >= (p.origem === 'convidado' ? 2 : 1)) continue;
+          out.push(p); porBusca.set(p.busca, (porBusca.get(p.busca) || 0) + 1);
+        }
+      };
+      pega(achados.filter(p => p.origem === 'citado' && p.rotulo === 'assunto digitado'), alvo);
+      pega(achados.filter(p => p.origem === 'citado' && p.rotulo === 'livro citado na fala'), alvo);
+      pega(achados.filter(p => p.origem === 'fala'), alvo);      // o que o corte mais fala
+      pega(achados.filter(p => p.origem === 'citado'), Math.min(alvo, out.length + 3));
+      pega(achados.filter(p => p.origem === 'tema'), alvo);
+      pega(achados.filter(p => p.origem === 'titulo'), alvo);
+      pega(achados.filter(p => p.origem === 'tema-ep'), alvo);
+      pega(achados.filter(p => p.origem === 'convidado'), Math.min(alvo, out.length + 2));
+      pega(achados.filter(p => p.origem === 'coringa'), alvo);
     };
-    pega(achados.filter(p => p.origem === 'citado' && p.rotulo === 'assunto digitado'), alvo);
-    pega(achados.filter(p => p.origem === 'citado' && p.rotulo === 'livro citado na fala'), alvo);
-    pega(achados.filter(p => p.origem === 'citado'), Math.min(alvo, out.length + 3));
-    pega(achados.filter(p => p.origem === 'tema'), alvo);      // assunto do corte primeiro
-    pega(achados.filter(p => p.origem === 'titulo'), alvo);    // palavras do título do corte
-    pega(achados.filter(p => p.origem === 'tema-ep'), alvo);   // assunto do episódio
-    pega(achados.filter(p => p.origem === 'convidado'), Math.min(alvo, out.length + 2)); // até 2 do convidado
-    pega(achados.filter(p => p.origem === 'coringa'), alvo);
+    rodada(false);
+    if (out.length < alvo && recentes.length) rodada(true);
+    for (const p of out) p.recente = usado(p);
     return out;
   }
 
@@ -704,6 +803,51 @@
     }
     return inicios.map((ini, i) => ({ indice: i, inicio: ini, fim: Math.min(ini + TEMPO_MAX, inicios[i + 1] ?? fim, fim) }));
   }
+  // Tempos PELA FALA: cada produto falado começa no segundo em que é falado; os outros (coringas etc.)
+  // tapam os maiores buracos que sobrarem. Volta um trecho por linha: { linha, inicio, fim }.
+  function planoPorFala(duracao, prefs) {
+    if (!Number.isFinite(duracao)) throw Error('Duração do vídeo não encontrada.');
+    const fim = Math.floor(duracao) - 1, n = prefs.length;
+    if (fim - 30 < TEMPO_MIN) throw Error('Vídeo curto demais para marcar tempos.');
+    if (n * TEMPO_MIN > fim - 30) throw Error('Não cabem ' + n + ' tempos de pelo menos ' + TEMPO_MIN + ' segundos neste vídeo.');
+    const lim = t => Math.max(30, Math.min(fim - TEMPO_MIN, Math.floor(t)));
+    const pos = []; // { linha, inicio }
+    const ocupado = t => pos.some(x => Math.abs(x.inicio - t) < TEMPO_MIN);
+    const comMomento = prefs.map((t, linha) => ({ t, linha })).filter(x => Number.isFinite(x.t)).sort((a, b) => a.t - b.t);
+    const sobra = prefs.map((t, linha) => ({ t, linha })).filter(x => !Number.isFinite(x.t)).map(x => x.linha);
+    for (const { t, linha } of comMomento) {
+      // se outro produto já está nesse ponto, empurra no máximo 30 s; passou disso, vai tapar buraco
+      let ini = lim(t);
+      const teto = Math.min(fim - TEMPO_MIN, ini + 30);
+      while (ocupado(ini) && ini < teto) ini++;
+      if (ocupado(ini)) sobra.push(linha); else pos.push({ linha, inicio: ini });
+    }
+    for (const linha of sobra) {
+      pos.sort((a, b) => a.inicio - b.inicio);
+      // maior pedaço do vídeo que ninguém cobre (cada produto cobre até 60 s)
+      let melhor = null;
+      const marcos = [{ inicio: 30, vazio: true }, ...pos];
+      for (let i = 0; i < marcos.length; i++) {
+        const desde = marcos[i].vazio ? 30 : marcos[i].inicio + TEMPO_MAX;
+        const ate = i + 1 < marcos.length ? marcos[i + 1].inicio : fim;
+        const ini = marcos[i].vazio ? 30 : Math.min(desde, ate);
+        if (ate - ini >= TEMPO_MIN && !ocupado(ini) && (!melhor || ate - desde > melhor.vao)) melhor = { ini, vao: ate - desde };
+      }
+      if (!melhor || melhor.vao <= 0) {
+        // vídeo já coberto: divide o trecho mais comprido ao meio
+        let maior = null;
+        for (let i = 0; i < pos.length; i++) {
+          const ate = Math.min(pos[i].inicio + TEMPO_MAX, i + 1 < pos.length ? pos[i + 1].inicio : fim);
+          if (ate - pos[i].inicio >= 2 * TEMPO_MIN && (!maior || ate - pos[i].inicio > maior.tam)) maior = { ini: Math.floor((pos[i].inicio + ate) / 2), tam: ate - pos[i].inicio };
+        }
+        if (!maior && !melhor) throw Error('Não sobrou lugar para todos os tempos.');
+        melhor = maior || melhor;
+      }
+      pos.push({ linha, inicio: melhor.ini });
+    }
+    pos.sort((a, b) => a.inicio - b.inicio);
+    return pos.map((x, i) => ({ indice: i, linha: x.linha, inicio: x.inicio, fim: Math.min(x.inicio + TEMPO_MAX, pos[i + 1] ? pos[i + 1].inicio : fim, fim) }));
+  }
   function cobertura(plano, duracao) {
     const coberto = plano.reduce((t, p) => t + (p.fim - p.inicio), 0);
     return { coberto, total: Math.max(0, Math.floor(duracao) - 1 - 30), faltaProdutos: Math.max(0, produtosParaCobrir(duracao) - plano.length) };
@@ -712,7 +856,7 @@
   const mmss = s => Math.floor(s / 60) + ':' + String(Math.floor(s % 60)).padStart(2, '0');
 
   if (typeof module !== 'undefined' && module.exports) {
-    module.exports = { livrosCitados, momentoNaFala, atribuirTrechos, palavrasDaFala, frequencia, palavrasDoTitulo, produtosParaCobrir, cobertura, ehPessoa, repetido, CITADOS, CORINGAS_PADRAO, norm, tem, detectar, planoDeBuscas, aceita, escolher, planoDeTempos, linkEpisodio, nomeDoEpisodio, nomesDoEpisodio, titulo1, limparDescricao, lerExtras, CONVIDADOS, TEMAS, INDISPONIVEL };
+    module.exports = { planoPorFala, assuntosDaFala, expressoesDaFala, semPropaganda, MAPA_FALA, livrosCitados, momentoNaFala, atribuirTrechos, palavrasDaFala, frequencia, palavrasDoTitulo, produtosParaCobrir, cobertura, ehPessoa, repetido, CITADOS, CORINGAS_PADRAO, norm, tem, detectar, planoDeBuscas, aceita, escolher, planoDeTempos, linkEpisodio, nomeDoEpisodio, nomesDoEpisodio, titulo1, limparDescricao, lerExtras, CONVIDADOS, TEMAS, INDISPONIVEL };
     return;
   }
 
@@ -947,6 +1091,10 @@
     registrar('Citado no corte: ' + ((det.citados || []).map(c => c.nome).join(', ') || '—') + ' | Convidado: ' + (det.convidados.map(c => c.nome).join(', ') || 'não identificado') + ' | Assunto: ' + (det.temas.map(t => t.nome).join(', ') || 'não identificado'));
     mostrarDeteccao();
 
+    det.semente = [...(idVideo || titulo)].reduce((h, ch) => (h * 31 + ch.charCodeAt(0)) >>> 0, 7);
+    if (det.assuntos && det.assuntos.length) registrar('Assuntos da fala: ' + det.assuntos.map(a => palavrasFortes(a.buscas[0][0]).slice(0, 3).join(' ') + (Number.isFinite(a.tempo) ? ' (' + mmss(a.tempo) + ')' : '')).join('; '));
+    const recentes = lerRecentes();
+    if (recentes.length) registrar('Produtos dos últimos cortes ficam por último (' + recentes.length + ' na lista).');
     const plano = planoDeBuscas(det, listaCoringas());
     const painel = await abrirSeletor();
     await espera(1200);
@@ -968,7 +1116,9 @@
     for (const q of plano) {
       if (parar) throw Error('Parado por você.');
       // para quando já há candidatos de sobra
-      if (q.origem !== 'tema' && q.origem !== 'titulo' && escolher(achados, faltam).length >= faltam && achados.length >= faltam + 3) break;
+      // já tem candidato de sobra: pula as listas fixas (assunto, convidado, coringa), mas sempre
+      // busca o que veio da fala, do que foi citado e do título do corte
+      if (!['fala', 'citado', 'titulo'].includes(q.origem) && escolher(achados, faltam, recentes).length >= faltam && achados.length >= faltam + 3) continue;
       registrar('Buscando: ' + q.busca);
       const linhas = await buscar(painel, q.busca);
       let bons = 0;
@@ -983,7 +1133,7 @@
     }
     ultimaDeteccao.buscas = resumoBuscas;
     // PRÉVIA: mostra as sugestões (as primeiras já marcadas) e espera você escolher
-    const candidatos = escolher(achados, faltam + 6);
+    const candidatos = escolher(achados, faltam + 6, recentes);
     for (const c of candidatos) if (!Number.isFinite(c.tempo)) c.tempo = momentoNaFala(segs, c.chaves);
     ultimosCandidatos = candidatos;
     etapa = 'previa';
@@ -1011,6 +1161,7 @@
       }
     }
     ultimosEscolhidos = marcados;
+    guardarRecentes(marcados.map(p => p.nome));
     const total = contagemMarcados(painel);
     etapa = 'conferir-produtos';
     const pouco = (total ?? 0) < cfg.minimo;
@@ -1072,22 +1223,20 @@
     if (!Number.isFinite(duracao)) throw Error('Não consegui ler a duração do vídeo no editor de tempos.');
     for (const v of todos('video', painel)) try { v.pause(); } catch {}
 
-    // plano fixo: mesma duração e mesma quantidade dão sempre os mesmos horários,
-    // então dá para continuar de onde parou (linhas já marcadas são puladas).
+    // linhas que já têm tempo são puladas (dá para continuar de onde parou).
     const nomes = linhas.map(l => l.nome);
     const porNome = new Set(nomes).size === nomes.length && nomes.every(Boolean);
     const acharLinha = (k) => { const ls = linhasDeTempo(painel); return porNome ? ls.find(l => l.nome === nomes[k]) : ls[k]; };
     if (linhas.every(l => l.marcado)) { etapa = 'conferir-tempos'; registrar('Todos os produtos já têm tempo.'); mostrarFinal(); return; }
-    const plano = planoDeTempos(duracao, linhas.length);
     // momento falado de cada produto (vem da prévia); linha ↔ produto pelo começo do nome
     const chaveNome = n => norm(n).slice(0, 28);
     const prefs = nomes.map(n => {
       const p = ultimosEscolhidos.find(x => chaveNome(x.nome) && (chaveNome(n).startsWith(chaveNome(x.nome)) || chaveNome(x.nome).startsWith(chaveNome(n))));
       return p && Number.isFinite(p.tempo) ? p.tempo : null;
     });
-    const linhaDoTrecho = atribuirTrechos(plano, prefs);
+    const plano = planoPorFala(duracao, prefs);
     const comMomento = prefs.filter(Number.isFinite).length;
-    if (comMomento) registrar(comMomento + ' produto(s) vão no trecho em que são falados; os outros ficam nos trechos que sobram.');
+    registrar(comMomento ? comMomento + ' produto(s) começam no segundo em que são falados; os outros tapam os buracos que sobram.' : 'Nenhum produto tem momento na fala: os tempos ficam espalhados pelo vídeo.');
     const jaTinham = linhas.filter(l => l.marcado).length;
     registrar('Duração ' + mmss(duracao) + ' — ' + linhas.length + ' tempos planejados' + (jaTinham ? ' (' + jaTinham + ' já tinham tempo, vou pular)' : '') + '.');
     const cob = cobertura(plano, duracao);
@@ -1098,7 +1247,7 @@
     for (let k = plano.length - 1; k >= 0; k--) {
       if (parar) throw Error('Parado por você.');
       const passo = plano[k];
-      const lk = linhaDoTrecho[k];
+      const lk = passo.linha;
       let linha = acharLinha(lk);
       if (!linha) throw Error('Não achei mais a linha do produto ' + (lk + 1) + ' (' + (nomes[lk] || '?') + ').');
       if (linha.marcado) { registrar('Já tinha tempo, pulei: ' + linha.nome.slice(0, 60)); continue; }
@@ -1280,6 +1429,13 @@
     } finally { try { q.remove(); } catch {} }
   }
 
+  // Lista dos produtos marcados nos últimos cortes (neste navegador), para variar de um corte para outro.
+  function lerRecentes() { try { return JSON.parse(GM_getValue('recentes', '[]')).map(x => x.n).slice(0, 60); } catch { return []; } }
+  function guardarRecentes(nomes) {
+    let lista = []; try { lista = JSON.parse(GM_getValue('recentes', '[]')); } catch {}
+    lista = [...nomes.map(n => ({ n, t: Date.now() })), ...lista.filter(x => !nomes.some(n => repetido(n, x.n)))].slice(0, 60);
+    GM_setValue('recentes', JSON.stringify(lista));
+  }
   function idDoVideo() {
     const m = location.href.match(/\/video\/([A-Za-z0-9_-]{11})/) || location.href.match(/[?&]udvid=([A-Za-z0-9_-]{11})/);
     if (m) return m[1];
@@ -1454,7 +1610,7 @@
       ...Object.entries(d.wiki || {}).map(([k, v]) => cinza('Wikipédia (' + k + '): ' + v.slice(0, 140) + '…'))].filter(Boolean));
   }
 
-  const ROTULO_ORIGEM = { citado: 'citado no corte', tema: 'assunto do corte', titulo: 'palavra do corte (título/fala)', convidado: 'convidado', 'tema-ep': 'assunto do episódio', coringa: 'coringa' };
+  const ROTULO_ORIGEM = { fala: 'assunto falado no corte', citado: 'citado no corte', tema: 'assunto do corte', titulo: 'palavra do corte (título/fala)', convidado: 'convidado', 'tema-ep': 'assunto do episódio', coringa: 'coringa' };
 
   function mostrarSugestoes(candidatos, faltam, jaTem) {
     const box = limpar(document.getElementById('pf-conf'));
@@ -1472,7 +1628,7 @@
       el('div', { style: 'color:#aaa;margin-bottom:4px' }, 'Nada foi marcado ainda. Desmarque o que não combina e marque os extras que quiser. ', contador),
       el('div', { style: 'max-height:260px;overflow:auto' }, ...caixas.map(({ p, c }) =>
         el('label', { style: 'display:flex;gap:6px;align-items:flex-start;margin:3px 0' }, c,
-          el('span', {}, p.nome, el('br'), el('span', { style: 'color:#888;font-size:11px' }, (p.rotulo === 'livro citado na fala' ? 'livro citado na fala' : ROTULO_ORIGEM[p.origem]) + ' · busca "' + p.busca + '"' + (Number.isFinite(p.tempo) ? ' · falado em ' + mmss(p.tempo) : ''))))))].filter(Boolean));
+          el('span', {}, p.nome, el('br'), el('span', { style: 'color:#888;font-size:11px' }, (p.rotulo === 'livro citado na fala' ? 'livro citado na fala' : ROTULO_ORIGEM[p.origem]) + ' · busca "' + p.busca + '"' + (Number.isFinite(p.tempo) ? ' · falado em ' + mmss(p.tempo) : '') + (p.recente ? ' · já usado num corte recente' : ''))))))].filter(Boolean));
     acoes(btn('✔ Marcar os escolhidos', () => {
       const lista = caixas.filter(x => x.c.checked).map(x => x.p);
       if (!lista.length) { status('Escolha pelo menos um produto.'); return; }
