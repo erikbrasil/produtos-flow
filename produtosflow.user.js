@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Produtos Flow — marcar produtos no YouTube Studio
 // @namespace    produtos-flow.cortes
-// @version      1.13.2
+// @version      1.13.3
 // @description  Escolhe produtos ligados ao convidado e ao assunto do corte, marca no Studio, distribui os tempos e PARA para conferência humana. Não salva nada sozinho. Sem IA.
 // @match        https://studio.youtube.com/*
 // @grant        GM_xmlhttpRequest
@@ -32,7 +32,7 @@
 
 (function () {
   'use strict';
-  const VERSAO = '1.13.2';
+  const VERSAO = '1.13.3';
 
   // ====================================================================================
   //  LISTAS — para acrescentar convidado ou tema, copie um bloco e troque os textos.
@@ -346,15 +346,23 @@
     const ws = norm(texto).split(' ');
     const cont = new Map();
     const forte = w => w && w.length >= 4 && !/\d/.test(w) && !VAZIAS.has(w) && !FALA_VAZIAS.has(w) && !FRASE_VAZIAS.has(w);
+    const liga = w => /^(de|da|do|dos|das)$/.test(w);
+    const soma = k => cont.set(k, (cont.get(k) || 0) + 1);
     for (let i = 0; i < ws.length - 1; i++) {
-      const a = ws[i];
-      if (!forte(a)) continue;
-      let k = null;
-      if (forte(ws[i + 1])) k = a + ' ' + ws[i + 1];
-      else if (/^(de|da|do|dos|das)$/.test(ws[i + 1]) && forte(ws[i + 2])) k = a + ' ' + ws[i + 1] + ' ' + ws[i + 2];
-      if (k) cont.set(k, (cont.get(k) || 0) + 1);
+      if (!forte(ws[i])) continue;
+      // "a b", "a de b", "a de b de c" ("criação do estado de israel")
+      let j = i + 1, partes = [ws[i]];
+      for (let n = 0; n < 2 && j < ws.length; n++) {
+        if (forte(ws[j])) { partes = [...partes, ws[j]]; j += 1; }
+        else if (liga(ws[j]) && forte(ws[j + 1])) { partes = [...partes, ws[j], ws[j + 1]]; j += 2; }
+        else break;
+        soma(partes.join(' '));
+      }
     }
-    return [...cont].filter(([, n]) => n >= 2).sort((x, y) => y[1] - x[1]).map(([k, n]) => ({ frase: k, n }));
+    let lista = [...cont].filter(([, n]) => n >= 2).map(([k, n]) => ({ frase: k, n }));
+    // expressão curta dentro de uma maior que aparece quase o mesmo tanto: fica só a maior
+    lista = lista.filter(x => !lista.some(y => y !== x && y.frase.length > x.frase.length && (' ' + y.frase + ' ').includes(' ' + x.frase + ' ') && y.n >= x.n * 0.6));
+    return lista.sort((x, y) => (y.n * y.frase.split(' ').length) - (x.n * x.frase.split(' ').length));
   }
   function assuntosDaFala(segs) {
     const limpos = semPropaganda(segs);
@@ -368,11 +376,13 @@
     out.sort((a, b) => b.n - a.n);
     const cobertas = out.flatMap(o => o.chaves);
     // expressões que nenhum item do dicionário cobre viram "livro <expressão>"
-    const extras = expressoesDaFala(texto).filter(x => !frequencia(x.frase, cobertas)).slice(0, 2).map(x => {
+    // expressões repetidas viram "livro <expressão>" (menos as que são só uma palavra-chave do dicionário)
+    const extras = expressoesDaFala(texto).filter(x => !cobertas.some(c => norm(c.replace(/\*/g, '')) === x.frase)).slice(0, 3).map(x => {
       const fortes = palavrasFortes(x.frase);
       return { n: x.n, chaves: [x.frase], tempo: momentoNaFala(limpos, [x.frase]), buscas: [['livro ' + x.frase, [['livro'], ...fortes.map(w => [w.length > 4 ? w.slice(0, w.length - 1) + '*' : w])]]] };
     });
-    return [...out.slice(0, 8), ...extras];
+    const fortes = extras.filter(x => x.n >= 3), fracos = extras.filter(x => x.n < 3);
+    return [...fortes, ...out.slice(0, 8), ...fracos];
   }
 
   // ====================================================================================
@@ -515,12 +525,14 @@
     const nomesCit = citados.flatMap(c => c.apelidos).join(' ').split(' ');
     const temasFinais = (forte.length ? forte : temas).slice(0, 3);
     const jaNoAssunto = w => temasFinais.some(t => temAlgum(w, TEMAS[t.id].chaves));
-    const fala = transcricao ? palavrasDaFala(transcricao, [...nomesConv, ...nomesCit]).filter(w => !jaNoAssunto(w)) : [];
+    // com legenda, as palavras mais faladas valem sozinhas (judeu, judaísmo, israel), mesmo que já sejam de um assunto
+    const fala = transcricao ? palavrasDaFala(transcricao, [...nomesConv, ...nomesCit]) : [];
     const doTitulo = palavrasDoTitulo(titulo, [...nomesConv, ...nomesCit]).filter(w => !jaNoAssunto(w));
     // palavras que aparecem no título E na fala vêm primeiro; depois as mais faladas; depois as do título
     const ambos = doTitulo.filter(w => fala.some(f => f.startsWith(w.slice(0, 5))));
-    const palavras = [...new Set([...ambos, ...fala.slice(0, 3), ...doTitulo])].slice(0, 4);
-    return { citados, convidados: convidados.slice(0, 4), temas: temasFinais, palavras, fala, livros: segs ? livrosCitados(semPropaganda(segs)) : [], assuntos: segs ? assuntosDaFala(segs) : [], falaTexto: transcricao || '' };
+    // com legenda: só palavras FALADAS (as do título que ninguém fala, tipo "conflitos", "poderia", ficam de fora)
+    const palavras = transcricao && fala.length ? [...new Set([...fala.slice(0, 4), ...ambos])].slice(0, 4) : [...new Set([...ambos, ...fala.slice(0, 3), ...doTitulo])].slice(0, 4);
+    return { citados, convidados: convidados.slice(0, 4), temas: temasFinais, palavras, fala, livros: segs ? livrosCitados(semPropaganda(segs)) : [], assuntos: segs ? assuntosDaFala(segs) : [], falaTexto: transcricao || '', segsFala: segs ? semPropaganda(segs) : [] };
   }
 
   // Nome do convidado dentro do corte. Título no formato "BRENO ALTMAN: um judeu diferente" (aceito só se o
@@ -560,7 +572,10 @@
   }
 
   // Assuntos centrais da FALA: as palavras com conteúdo mais repetidas na legenda (sem IA, só contagem).
-  const FALA_VAZIAS = new Set(('entao tipo assim cara mano velho ne nao sim tipo aham uhum olha olhar ouvir escuta entendeu entende ' +
+  const FALA_VAZIAS = new Set(('visao diferente diferentes normal normais verdade questao situacao problema problemas lugar parte partes ' +
+    'conversa conversar conversando ideia ideias exemplo certo certa errado claro outra outro outras outros mesma mesmo mesmos ' +
+    'grande grandes pequeno maior menor melhor pior primeiro primeira ultimo ultima todos todas cada qualquer tanto tanta ' +
+    'entao tipo assim cara mano velho ne nao sim tipo aham uhum olha olhar ouvir escuta entendeu entende ' +
     'sabe saber sei sabia acho acha achar acredito pensar penso pensando falar falei falou falando dizer disse dizendo fazer faz fazendo feito ' +
     'estar estou esta estava estavam estao estamos ficar fica ficou ter tenho tinha tinham temos teve tiveram poder pode podia posso podem ' +
     'querer quero queria quer precisa precisar preciso vamos vou vai ia iam fui foram sendo sido seria seriam isso aquilo essa esse esses essas ' +
@@ -701,8 +716,19 @@
     }
     // ASSUNTOS DA FALA: o que o corte mais repete, cada um com o momento em que é falado
     for (const a of det.assuntos || []) {
-      for (const [b, exige, recusa] of a.buscas.slice(0, (det.assuntos.indexOf(a) < 2 && a.n >= 6) ? 2 : 1)) {
+      for (const [b, exige, recusa] of a.buscas.slice(0, a.n >= 10 ? 2 : 1)) {
         fila.push({ busca: b, exige: semLivro(exige), recusa: [...(recusa || []), ...(ehBuscaDeLivro(b) || exige.some(g => g.includes('livro')) ? RECUSA_LIVRO : [])], origem: 'fala', rotulo: 'assunto da fala', chaves: a.chaves, tempo: a.tempo });
+      }
+    }
+    // palavras mais faladas no corte: busca direta ("livro judeu", "judaísmo"…), logo depois dos assuntos
+    // (palavra que já está numa expressão buscada, tipo "estado" em "criação do estado de israel", não repete)
+    const expr = det.falaTexto ? expressoesDaFala(det.falaTexto).filter(x => x.n >= 3).map(x => x.frase.split(' ')) : [];
+    const emExpressao = w => expr.some(ws => ws.includes(w));
+    if (det.falaTexto && (det.fala || []).length) {
+      for (const w of (det.fala || []).filter(w => !emExpressao(w)).slice(0, 3)) {
+        const ex = [[w.length > 4 ? w.slice(0, Math.max(4, w.length - 2)) + '*' : w]];
+        fila.push({ busca: 'livro ' + w, exige: ex, recusa: RECUSA_LIVRO, origem: 'fala', rotulo: 'palavra mais falada', chaves: [w], tempo: momentoNaFala(det.segsFala || [], [w]) });
+        fila.push({ busca: w, exige: ex, recusa: ['adesivo', 'capinha', 'case', 'pelicula'], origem: 'fala', rotulo: 'palavra mais falada', chaves: [w], tempo: momentoNaFala(det.segsFala || [], [w]) });
       }
     }
     const chavesAssunto = det.temas.flatMap(t => TEMAS[t.id].chaves);
@@ -721,7 +747,7 @@
       }
     }
     // palavras do título do corte (ex.: "trânsito", "lasanha", "6x1") — o assunto do corte manda
-    for (const w of det.palavras || []) {
+    for (const w of (det.falaTexto && (det.fala || []).length) ? [] : (det.palavras || [])) {
       const ex = [[w.length > 4 ? w.slice(0, Math.max(4, w.length - 2)) + '*' : w]];
       fila.push({ busca: 'livro ' + w, exige: ex, recusa: RECUSA_LIVRO, origem: 'titulo', rotulo: 'título do corte', chaves: [w] });
       fila.push({ busca: w, exige: ex, recusa: ['adesivo', 'capinha', 'case', 'pelicula'], origem: 'titulo', rotulo: 'título do corte', chaves: [w] });
