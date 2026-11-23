@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Produtos Flow — marcar produtos no YouTube Studio
 // @namespace    produtos-flow.cortes
-// @version      1.13.1
+// @version      1.13.2
 // @description  Escolhe produtos ligados ao convidado e ao assunto do corte, marca no Studio, distribui os tempos e PARA para conferência humana. Não salva nada sozinho. Sem IA.
 // @match        https://studio.youtube.com/*
 // @grant        GM_xmlhttpRequest
@@ -32,7 +32,7 @@
 
 (function () {
   'use strict';
-  const VERSAO = '1.13.1';
+  const VERSAO = '1.13.2';
 
   // ====================================================================================
   //  LISTAS — para acrescentar convidado ou tema, copie um bloco e troque os textos.
@@ -1093,7 +1093,22 @@
     if (idVideo) {
       registrar('Lendo a legenda do corte (pode levar até 1 minuto; não abre aba nova)…');
       try {
-        const leg = await obterLegendaDoStudio(idVideo);
+        let leg;
+        try { leg = await obterLegendaDoStudio(idVideo); }
+        catch (e1) {
+          if (!e1.gerando || parar) throw e1;
+          // legenda ainda sendo gerada (corte recém-enviado): sem ela os produtos ficam ruins, então pergunta se espera
+          registrar('O YouTube ainda está gerando a legenda deste corte.');
+          const esperar = window.confirm('O YouTube ainda está gerando a legenda automática deste corte (leva alguns minutos depois que o envio termina).\n\nSem a legenda os produtos ficam bem piores.\n\nOK = esperar a legenda (eu tento de novo a cada 30 segundos, por até 15 minutos; pode deixar a aba aberta e fazer outra coisa).\nCancelar = seguir agora só pelo título.');
+          if (!esperar) throw e1;
+          const t0 = Date.now();
+          while (!leg) {
+            if (Date.now() - t0 > 15 * 60000) throw Error('a legenda não ficou pronta em 15 minutos');
+            for (let i = 30; i > 0; i -= 5) { if (parar) throw Error('parado por você'); status('Esperando a legenda do YouTube… nova tentativa em ' + i + ' s (' + mmss((Date.now() - t0) / 1000) + ' esperando)'); await espera(5000); }
+            try { leg = await obterLegendaDoStudio(idVideo); }
+            catch (e2) { if (!e2.gerando && !e2.tentarDeNovo) throw e2; registrar('Legenda ainda não está pronta (' + mmss((Date.now() - t0) / 1000) + ').'); }
+          }
+        }
         const durs0 = todos('video').map(v => v.duration).filter(n => Number.isFinite(n) && n > 0);
         const dur = durs0.length ? Math.max(...durs0) : (leg.dur || 0);
         segs = leg.segs.map((x, i, arr) => ({ ini: x.p * dur, fim: (arr[i + 1] ? arr[i + 1].p : 1) * dur, texto: x.texto }));
@@ -1420,9 +1435,14 @@
     const tq = sel => raizes(doc).flatMap(r => [...r.querySelectorAll(sel)]);
     const vis = el => !!el && el.getClientRects().length > 0 && win.getComputedStyle(el).visibility !== 'hidden';
     const btnTexto = re => tq('ytcp-button, button, tp-yt-paper-button').filter(vis).find(b => re.test((b.textContent || '').trim()));
-    const editar = await ate(() => btnTexto(/^Editar legendas$/i) || btnTexto(/^Edit subtitles$/i), 35000);
+    const textoPagina = () => ((doc.body && doc.body.innerText) || '').replace(/\s+/g, ' ');
+    const erroGerando = () => { const e = Error('o YouTube ainda está gerando a legenda automática deste corte'); e.gerando = true; return e; };
+    const ehGerando = () => /Gerando legendas autom|Generating automatic|depois que as legendas forem geradas|after (the )?(subtitles|captions) are generated|Processando|Processing|Enviando v|Uploading/i.test(textoPagina());
+    const editar = await ate(() => btnTexto(/^Editar legendas$/i) || btnTexto(/^Edit subtitles$/i) || (ehGerando() ? 'gerando' : null), 35000);
+    if (editar === 'gerando' || (editar && ehGerando())) throw erroGerando();
     if (!editar) {
-      const txt = ((doc.body && doc.body.innerText) || '').replace(/\s+/g, ' ');
+      const txt = textoPagina();
+      if (/Algo deu errado|Something went wrong/i.test(txt)) { const e = Error('a página de legendas deu erro ("Algo deu errado")'); e.tentarDeNovo = true; throw e; }
       if (/Adicionar legenda|Add subtitles|Adicionar idioma|Add language/i.test(txt)) throw Error('o vídeo ainda não tem legenda automática (o YouTube demora um pouco depois do envio)');
       const erro = txt.match(/(Ocorreu um erro|Algo deu errado|erro|não encontrad)[^.]{0,80}/i);
       throw Error('não achei o botão "Editar legendas"' + (erro ? ' — a página disse: ' + erro[0] : ''));
@@ -1430,7 +1450,7 @@
     editar.click();
     // o editor abre com a transcrição inteira numa caixa de texto (com pontuação). Só lê; nada é salvo.
     const caixa = await ate(() => { const t = tq('textarea').sort((x, y) => y.value.length - x.value.length)[0]; return t && t.value.length > 200 ? t : null; }, 40000);
-    if (!caixa) throw Error('a legenda não carregou (o vídeo pode ainda estar sem legenda automática)');
+    if (!caixa) { if (ehGerando()) throw erroGerando(); const e = Error('a legenda veio vazia (o YouTube pode ainda estar gerando a legenda automática)'); e.gerando = true; throw e; }
     await espera(800);
     const texto = caixa.value.replace(/\s+/g, ' ').trim();
     const dur = (await ate(() => { const d = tq('video').map(v => v.duration).filter(n => Number.isFinite(n) && n > 0); return d.length ? Math.max(...d) : null; }, 8000)) || 0;
@@ -1443,6 +1463,10 @@
   // Abre a página Legendas do vídeo num quadro invisível DENTRO desta mesma aba (nenhuma aba nova),
   // lê o texto e apaga o quadro. NUNCA clica em "Salvar", "Publicar" ou "Pronto".
   async function obterLegendaDoStudio(id) {
+    try { return await obterLegendaUmaVez(id); }
+    catch (e) { if (e.tentarDeNovo && !parar) { await espera(3000); return await obterLegendaUmaVez(id); } throw e; }
+  }
+  async function obterLegendaUmaVez(id) {
     const guardada = GM_getValue('legenda:' + id, '');
     if (guardada) { try { const j = JSON.parse(guardada); if (j.ok && j.segs?.length) return j; } catch {} }
     const q = document.createElement('iframe');
