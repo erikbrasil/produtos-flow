@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Produtos Flow — marcar produtos no YouTube Studio
 // @namespace    produtos-flow.cortes
-// @version      1.13.5
+// @version      1.14.0
 // @description  Escolhe produtos ligados ao convidado e ao assunto do corte, marca no Studio, distribui os tempos e PARA para conferência humana. Não salva nada sozinho. Sem IA.
 // @match        https://studio.youtube.com/*
 // @grant        GM_xmlhttpRequest
@@ -32,7 +32,7 @@
 
 (function () {
   'use strict';
-  const VERSAO = '1.13.5';
+  const VERSAO = '1.14.0';
 
   // ====================================================================================
   //  LISTAS — para acrescentar convidado ou tema, copie um bloco e troque os textos.
@@ -297,7 +297,9 @@
   // ITENS CORINGA: completam a quantidade quando não acha produto do convidado/assunto.
   // Dá para trocar pelo painel ("Itens coringa"), uma busca por linha. O produto precisa
   // ter todas as palavras principais da busca.
-  const CORINGAS_PADRAO = ['Hábitos Atômicos', 'A Psicologia Financeira', 'Mais Esperto que o Diabo', 'Microfone podcast', 'Fone de ouvido bluetooth', 'Kindle'];
+  // coringas: coisas do mundo do podcast, que combinam com qualquer corte (sem livro de autoajuda aleatório)
+  const CORINGAS_PADRAO = ['Microfone podcast', 'Fone de ouvido bluetooth', 'Cadeira gamer', 'Kindle', 'Webcam full hd', 'Ring light'];
+  const CORINGAS_ANTIGOS = ['Hábitos Atômicos', 'A Psicologia Financeira', 'Mais Esperto que o Diabo', 'Microfone podcast', 'Fone de ouvido bluetooth', 'Kindle'].join('\n');
 
   // ASSUNTOS DA FALA: o que a legenda do corte repete vira busca, cada uma com o momento em que é falado.
   // chaves = palavras que contam na fala (com * = começa com); buscas = [texto, palavras exigidas no produto].
@@ -540,6 +542,35 @@
     return { citados, convidados: convidados.slice(0, 4), temas: temasFinais, palavras, fala, livros: segs ? livrosCitados(semPropaganda(segs)) : [], assuntos: segs ? assuntosDaFala(segs) : [], falaTexto: transcricao || '', segsFala: segs ? semPropaganda(segs) : [] };
   }
 
+  // Transcrição de ARQUIVO (Premiere, programa de transcrição, etc.): .srt, .vtt ou .txt.
+  // Com horários ("00:01:02,345 --> 00:01:05,000" ou "00;01;02;10 - 00;01;05;00") cada trecho já vem com o segundo
+  // em que é falado; texto puro vira frases com posição proporcional (igual à legenda do YouTube).
+  function lerArquivoTranscricao(texto) {
+    const linhas = String(texto || '').replace(/\r/g, '').split('\n');
+    const tc = '(\\d{1,2}[:;.]\\d{2}[:;.]\\d{2}(?:[,.:;]\\d{1,3})?|\\d{1,2}[:;]\\d{2}(?:[,.]\\d{1,3})?)';
+    const reTempo = new RegExp('^\\s*' + tc + '\\s*(?:-->|–|-)\\s*' + tc);
+    const seg = t => { const p = t.split(/[:;.,]/).map(Number); const [h, m, x] = p.length >= 4 ? [p[0], p[1], p[2]] : p.length === 3 && /[,.]\d{3}$/.test(t) ? [0, p[0], p[1]] : p.length === 3 ? [p[0], p[1], p[2]] : [0, p[0], p[1]]; return h * 3600 + m * 60 + x; };
+    const segs = [];
+    for (let i = 0; i < linhas.length; i++) {
+      const m = reTempo.exec(linhas[i]);
+      if (!m) continue;
+      const partes = [];
+      for (let j = i + 1; j < linhas.length && linhas[j].trim() && !reTempo.test(linhas[j]); j++) {
+        const l = linhas[j].trim();
+        if (/^\d+$/.test(l) && (!linhas[j + 1] || reTempo.test(linhas[j + 1]))) continue;      // número do trecho (.srt)
+        if (/^(falante|speaker|locutor|desconhecido|unknown)\s*\d*$/i.test(l)) continue;          // rótulo do Premiere
+        partes.push(l.replace(/<[^>]+>/g, ''));
+      }
+      if (partes.length) segs.push({ ini: seg(m[1]), fim: seg(m[2]), texto: partes.join(' ') });
+    }
+    if (segs.length >= 3) return { comTempo: true, segs };
+    const corpo = linhas.join(' ').replace(/\s+/g, ' ').trim();
+    if (corpo.length < 200) return null;
+    const frases = corpo.split(/(?<=[.!?…])\s+/).filter(Boolean);
+    const out = []; let pos = 0;
+    for (const f of frases) { out.push({ p: pos / corpo.length, texto: f }); pos += f.length + 1; }
+    return { comTempo: false, segs: out };
+  }
   // Nome do convidado dentro do corte. Título no formato "BRENO ALTMAN: um judeu diferente" (aceito só se o
   // nome aparecer com letra maiúscula na fala, para não confundir com "GUERRA NUCLEAR:") e a apresentação
   // na fala ("hoje eu vou conversar com o Breno Altman"). A grafia da fala vale mais que a do título.
@@ -922,7 +953,7 @@
   const mmss = s => Math.floor(s / 60) + ':' + String(Math.floor(s % 60)).padStart(2, '0');
 
   if (typeof module !== 'undefined' && module.exports) {
-    module.exports = { nomesNoCorte, planoPorFala, assuntosDaFala, expressoesDaFala, semPropaganda, MAPA_FALA, livrosCitados, momentoNaFala, atribuirTrechos, palavrasDaFala, frequencia, palavrasDoTitulo, produtosParaCobrir, cobertura, ehPessoa, repetido, CITADOS, CORINGAS_PADRAO, norm, tem, detectar, planoDeBuscas, aceita, escolher, planoDeTempos, linkEpisodio, nomeDoEpisodio, nomesDoEpisodio, titulo1, limparDescricao, lerExtras, CONVIDADOS, TEMAS, INDISPONIVEL };
+    module.exports = { lerArquivoTranscricao, nomesNoCorte, planoPorFala, assuntosDaFala, expressoesDaFala, semPropaganda, MAPA_FALA, livrosCitados, momentoNaFala, atribuirTrechos, palavrasDaFala, frequencia, palavrasDoTitulo, produtosParaCobrir, cobertura, ehPessoa, repetido, CITADOS, CORINGAS_PADRAO, norm, tem, detectar, planoDeBuscas, aceita, escolher, planoDeTempos, linkEpisodio, nomeDoEpisodio, nomesDoEpisodio, titulo1, limparDescricao, lerExtras, CONVIDADOS, TEMAS, INDISPONIVEL };
     return;
   }
 
@@ -937,7 +968,7 @@
     minimo: Number(GM_getValue('minimo', 5)) || 5,
     extras: String(GM_getValue('extras', '')),
     dica: '',
-    coringas: String(GM_getValue('coringas', CORINGAS_PADRAO.join('\n'))),
+    coringas: (v => v.trim() === CORINGAS_ANTIGOS ? CORINGAS_PADRAO.join('\n') : v)(String(GM_getValue('coringas', CORINGAS_PADRAO.join('\n')))),
   };
   const listaCoringas = () => cfg.coringas.split(/\r?\n/).map(x => x.trim()).filter(Boolean);
   const log = [];
@@ -1123,7 +1154,15 @@
     // fala do corte (legenda automática) → assuntos centrais
     let transcricao = '', segs = null, motivoLegenda = '';
     const idVideo = idDoVideo();
-    if (idVideo) {
+    if (transcricaoArquivo && transcricaoArquivo.id !== (idVideo || location.pathname)) transcricaoArquivo = null; // era de outro vídeo
+    if (transcricaoArquivo) {
+      const durs0 = todos('video').map(v => v.duration).filter(n => Number.isFinite(n) && n > 0);
+      const dur = durs0.length ? Math.max(...durs0) : 0;
+      const t = transcricaoArquivo.dados;
+      segs = t.comTempo ? t.segs.map(x => ({ ...x })) : t.segs.map((x, i, arr) => ({ ini: x.p * dur, fim: (arr[i + 1] ? arr[i + 1].p : 1) * dur, texto: x.texto }));
+      transcricao = segs.map(x => x.texto).join(' ');
+      registrar('Transcrição do arquivo "' + transcricaoArquivo.nome + '": ' + segs.length + ' trechos' + (t.comTempo ? ' com horário' : ' (sem horário: tempo estimado)') + '. Não preciso da legenda do YouTube.');
+    } else if (idVideo) {
       registrar('Lendo a legenda do corte (pode levar até 1 minuto; não abre aba nova)…');
       try {
         let leg;
@@ -1169,7 +1208,7 @@
     if (det.livros && det.livros.length) registrar('Livros citados na fala: ' + det.livros.map(l => l.titulo + ' (' + mmss(l.tempo) + ')').join('; '));
     det.dicas = dicas;
     if (det.fala && det.fala.length) registrar('Mais falado no corte: ' + det.fala.join(', '));
-    ultimaDeteccao = { legenda: segs ? 'lida (' + segs.length + ' frases)' : (motivoLegenda ? 'não lida — ' + motivoLegenda : ''), assuntos: (det.assuntos || []).map(a => a.buscas[0][0].replace(/^Livro /i, '') + (Number.isFinite(a.tempo) ? ' (' + mmss(a.tempo) + ')' : '')), livros: (det.livros || []).map(l => l.titulo), fala: det.fala || [], palavras: det.palavras || [], titulo, tituloEpisodio, idEpisodio: idEp, tags: tags.slice(0, 15), citados: (det.citados || []).map(c => c.nome), convidados: det.convidados.map(c => c.nome + (c.desconhecido ? ' (do episódio)' : '')), temas: det.temas.map(t => t.nome + ' (' + t.pontos + ')'), wiki: Object.fromEntries(Object.entries(wiki).map(([k, v]) => [k, v.slice(0, 160)])) };
+    ultimaDeteccao = { legenda: transcricaoArquivo ? 'arquivo "' + transcricaoArquivo.nome + '" (' + (segs ? segs.length : 0) + ' trechos)' : segs ? 'lida (' + segs.length + ' frases)' : (motivoLegenda ? 'não lida — ' + motivoLegenda : ''), assuntos: (det.assuntos || []).map(a => a.buscas[0][0].replace(/^Livro /i, '') + (Number.isFinite(a.tempo) ? ' (' + mmss(a.tempo) + ')' : '')), livros: (det.livros || []).map(l => l.titulo), fala: det.fala || [], palavras: det.palavras || [], titulo, tituloEpisodio, idEpisodio: idEp, tags: tags.slice(0, 15), citados: (det.citados || []).map(c => c.nome), convidados: det.convidados.map(c => c.nome + (c.desconhecido ? ' (do episódio)' : '')), temas: det.temas.map(t => t.nome + ' (' + t.pontos + ')'), wiki: Object.fromEntries(Object.entries(wiki).map(([k, v]) => [k, v.slice(0, 160)])) };
     registrar('Citado no corte: ' + ((det.citados || []).map(c => c.nome).join(', ') || '—') + ' | Convidado: ' + (det.convidados.map(c => c.nome).join(', ') || 'não identificado') + ' | Assunto: ' + (det.temas.map(t => t.nome).join(', ') || 'não identificado'));
     mostrarDeteccao();
 
@@ -1629,12 +1668,33 @@
     campoDigitavel(coringas, 'Itens coringa (uma busca por item):', v => { cfg.coringas = v; GM_setValue('coringas', v); status('Itens coringa guardados (' + listaCoringas().length + ').'); }, true);
     const salvarCoringas = el('button', { class: 'pf sec' }, 'Guardar itens coringa');
     const copiar = el('button', { class: 'pf sec', id: 'pf-copiar' }, '📋 Copiar relatório (para mandar ao Claude)');
+    // transcrição de arquivo
+    const entradaArquivo = el('input', { type: 'file', accept: '.srt,.vtt,.txt,text/plain', style: 'display:none' });
+    const botaoArquivo = el('button', { class: 'pf sec', id: 'pf-arquivo' }, '📄 Usar transcrição de arquivo');
+    const rotuloArquivo = el('span', { style: 'color:#aaa;font-size:11px' }, '');
+    const mostrarArquivo = () => { rotuloArquivo.textContent = transcricaoArquivo ? '✔ ' + transcricaoArquivo.nome + ' (' + transcricaoArquivo.dados.segs.length + ' trechos) — clique de novo para trocar' : ''; };
+    botaoArquivo.onclick = () => { entradaArquivo.value = ''; entradaArquivo.click(); };
+    entradaArquivo.onchange = () => {
+      const f = entradaArquivo.files && entradaArquivo.files[0];
+      if (!f) return;
+      const leitor = new FileReader();
+      leitor.onload = () => {
+        const dados = lerArquivoTranscricao(String(leitor.result || ''));
+        if (!dados) { status('Esse arquivo não parece uma transcrição (.srt ou .txt com o texto do corte).'); return; }
+        transcricaoArquivo = { id: idDoVideo() || location.pathname, nome: f.name, dados };
+        mostrarArquivo();
+        status('Transcrição carregada: ' + f.name + ' (' + dados.segs.length + ' trechos' + (dados.comTempo ? ', com horários' : '') + '). Agora clique em Começar.');
+      };
+      leitor.readAsText(f, 'utf-8');
+    };
     const painel = el('div', { id: 'pf-painel' },
       el('header', {}, el('span', {}, '🛒 Produtos Flow ', el('small', {}, 'v' + VERSAO)), fechar),
       el('section', {},
         el('div', { id: 'pf-status' }, 'Abra o vídeo (detalhes) ou o rascunho e clique em Começar.'),
         el('label', { style: 'display:block;margin-top:8px' }, 'Assunto do corte (opcional): ', dica),
         el('div', { style: 'color:#888;font-size:11px' }, 'Ex.: vício, felicidade · STF · drift, Japão. Vem antes de tudo na busca.'),
+        el('div', { style: 'margin-top:8px' }, botaoArquivo, ' ', rotuloArquivo, entradaArquivo),
+        el('div', { style: 'color:#888;font-size:11px' }, 'Opcional: .srt/.txt exportado do Premiere ou do programa de transcrição. Com ele não precisa esperar a legenda do YouTube.'),
         el('div', { id: 'pf-acoes' })),
       el('section', { id: 'pf-det', style: 'display:none' }),
       el('section', { id: 'pf-conf', style: 'display:none' }),
@@ -1837,6 +1897,7 @@
   }
 
   // O Studio é uma página que troca de tela sem recarregar: confere de tempos em tempos.
+  let transcricaoArquivo = null; // { id, nome, dados } — arquivo .srt/.txt escolhido para o vídeo aberto
   let falhouMontar = false;
   setInterval(() => {
     if (!document.body) return;
