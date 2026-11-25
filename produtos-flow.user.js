@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Produtos Flow — marcar produtos no YouTube Studio
 // @namespace    produtos-flow.cortes
-// @version      1.14.1
+// @version      1.15.0
 // @description  Escolhe produtos ligados ao convidado e ao assunto do corte, marca no Studio, distribui os tempos e PARA para conferência humana. Não salva nada sozinho. Sem IA.
 // @match        https://studio.youtube.com/*
 // @grant        GM_xmlhttpRequest
@@ -32,7 +32,7 @@
 
 (function () {
   'use strict';
-  const VERSAO = '1.14.1';
+  const VERSAO = '1.15.0';
 
   // ====================================================================================
   //  LISTAS — para acrescentar convidado ou tema, copie um bloco e troque os textos.
@@ -1143,16 +1143,43 @@
     // aberto na página "Idiomas/Legendas": lê a legenda daqui mesmo, guarda e volta para Detalhes
     const naLegenda = location.pathname.match(/\/video\/([A-Za-z0-9_-]{11})\/translations/);
     if (naLegenda) {
-      registrar('Você está na página de Idiomas: vou ler a legenda daqui e voltar para Detalhes.');
-      const r = await lerLegendaNoQuadro(document, window);
-      GM_setValue('legenda:' + naLegenda[1], JSON.stringify({ ...r, t: Date.now() }));
-      try { document.querySelectorAll('ytve-captions-editor-modal, tp-yt-paper-dialog').forEach(d => d.style && (d.style.display = 'none')); } catch {}
-      GM_setValue('pf-continuar', naLegenda[1]);
-      status('Legenda guardada (' + r.segs.length + ' frases). Voltando para Detalhes… (não salvei nada)');
-      await espera(800);
-      location.href = '/video/' + naLegenda[1] + '/edit';
-      await espera(60000); // a página recarrega antes disso
-      return;
+      const id = naLegenda[1];
+      const veioDeDetalhes = GM_getValue('pf-ir-legenda', '') === id;
+      const voltar = async () => {
+        GM_setValue('pf-ir-legenda', ''); GM_setValue('pf-continuar', id);
+        try { document.querySelectorAll('ytve-captions-editor-modal, tp-yt-paper-dialog').forEach(d => d.style && (d.style.display = 'none')); } catch {}
+        await espera(800);
+        location.href = '/video/' + id + '/edit';
+        await espera(60000); // a página troca antes disso
+      };
+      registrar('Página de Idiomas: lendo a legenda do corte (não salvo nada)…');
+      try {
+        const r = await lerLegendaNoQuadro(document, window);
+        GM_setValue('legenda:' + id, JSON.stringify({ ...r, t: Date.now() }));
+        status('Legenda guardada (' + r.segs.length + ' frases). Voltando para Detalhes…');
+        return await voltar();
+      } catch (e) {
+        if (parar) { GM_setValue('pf-ir-legenda', ''); throw Error('Parado por você.'); }
+        if (e.gerando) {
+          // YouTube ainda gerando: pergunta uma vez se espera; depois tenta de novo a cada 30 s recarregando a página
+          const t0 = Number(GM_getValue('pf-ir-legenda-t0', 0)) || Date.now();
+          let esperar = GM_getValue('pf-ir-legenda-espera', '') === '1';
+          if (!esperar) {
+            esperar = window.confirm('O YouTube ainda está gerando a legenda automática deste corte (leva alguns minutos depois que o envio termina).\n\nSem a legenda os produtos ficam bem piores.\n\nOK = esperar (tento de novo a cada 30 segundos, por até 15 minutos; pode deixar a aba aberta).\nCancelar = voltar e seguir só pelo título.');
+            if (esperar) { GM_setValue('pf-ir-legenda-espera', '1'); GM_setValue('pf-ir-legenda', id); GM_setValue('pf-ir-legenda-t0', t0); }
+          }
+          if (esperar && Date.now() - t0 < 15 * 60000) {
+            for (let i = 30; i > 0; i -= 5) { if (parar) { GM_setValue('pf-ir-legenda', ''); throw Error('Parado por você.'); } status('Esperando a legenda do YouTube… nova tentativa em ' + i + ' s (' + mmss((Date.now() - t0) / 1000) + ' esperando)'); await espera(5000); }
+            location.reload();
+            await espera(60000);
+            return;
+          }
+          e.message = esperar ? 'a legenda não ficou pronta em 15 minutos' : 'o YouTube ainda estava gerando a legenda';
+        }
+        GM_setValue('pf-legenda-falhou', JSON.stringify({ id, motivo: e.message }));
+        if (veioDeDetalhes || GM_getValue('pf-ir-legenda-espera', '') === '1') { status('Legenda: ' + e.message + '. Voltando para Detalhes para seguir pelo título…'); return await voltar(); }
+        throw e;
+      }
     }
     const titulo = (await lerTitulo()).trim();
     const descricao = textoDe(campo('descricao'));
@@ -1177,35 +1204,31 @@
       transcricao = segs.map(x => x.texto).join(' ');
       registrar('Transcrição do arquivo "' + transcricaoArquivo.nome + '": ' + segs.length + ' trechos' + (t.comTempo ? ' com horário' : ' (sem horário: tempo estimado)') + '. Não preciso da legenda do YouTube.');
     } else if (idVideo) {
-      registrar('Lendo a legenda do corte (pode levar até 1 minuto; não abre aba nova)…');
-      try {
-        let leg;
-        try { leg = await obterLegendaDoStudio(idVideo); }
-        catch (e1) {
-          if (!e1.gerando || parar) throw e1;
-          // legenda ainda sendo gerada (corte recém-enviado): sem ela os produtos ficam ruins, então pergunta se espera
-          registrar('O YouTube ainda está gerando a legenda deste corte.');
-          const esperar = window.confirm('O YouTube ainda está gerando a legenda automática deste corte (leva alguns minutos depois que o envio termina).\n\nSem a legenda os produtos ficam bem piores.\n\nOK = esperar a legenda (eu tento de novo a cada 30 segundos, por até 15 minutos; pode deixar a aba aberta e fazer outra coisa).\nCancelar = seguir agora só pelo título.');
-          if (!esperar) throw e1;
-          const t0 = Date.now();
-          while (!leg) {
-            if (Date.now() - t0 > 15 * 60000) throw Error('a legenda não ficou pronta em 15 minutos');
-            for (let i = 30; i > 0; i -= 5) { if (parar) throw Error('parado por você'); status('Esperando a legenda do YouTube… nova tentativa em ' + i + ' s (' + mmss((Date.now() - t0) / 1000) + ' esperando)'); await espera(5000); }
-            try { leg = await obterLegendaDoStudio(idVideo); }
-            catch (e2) { if (!e2.gerando && !e2.tentarDeNovo) throw e2; registrar('Legenda ainda não está pronta (' + mmss((Date.now() - t0) / 1000) + ').'); }
-          }
-        }
+      // legenda: já guardada (lida na página de Idiomas) → usa; senão vai até a página de Idiomas NESTA aba,
+      // lê e volta sozinho (funciona em qualquer navegador, porque é a tela de verdade)
+      let leg = null;
+      try { const g = JSON.parse(GM_getValue('legenda:' + idVideo, '') || 'null'); if (g && g.ok && g.segs && g.segs.length) leg = g; } catch {}
+      let falhou = null;
+      try { falhou = JSON.parse(GM_getValue('pf-legenda-falhou', '') || 'null'); } catch {}
+      if (falhou && falhou.id !== idVideo) falhou = null;
+      if (falhou) GM_setValue('pf-legenda-falhou', '');
+      if (leg) {
         const durs0 = todos('video').map(v => v.duration).filter(n => Number.isFinite(n) && n > 0);
         const dur = durs0.length ? Math.max(...durs0) : (leg.dur || 0);
         segs = leg.segs.map((x, i, arr) => ({ ini: x.p * dur, fim: (arr[i + 1] ? arr[i + 1].p : 1) * dur, texto: x.texto }));
         transcricao = segs.map(x => x.texto).join(' ');
-        registrar('Legenda lida pelo Studio: ' + segs.length + ' frases, ' + transcricao.split(' ').length + ' palavras.');
-      } catch (e) {
-        if (parar) throw Error('Parado por você.');
-        motivoLegenda = e.message;
-        registrar('Legenda pelo Studio: ' + e.message + '.');
-        try { const r = await lerTranscricao(idVideo); transcricao = r.texto; registrar('Legenda lida (' + r.metodo + ').'); }
-        catch (e2) { registrar('Sem legenda: ' + e2.message + '. Sigo pelo título.'); }
+        registrar('Legenda do corte: ' + segs.length + ' frases, ' + transcricao.split(' ').length + ' palavras.');
+      } else if (falhou) {
+        motivoLegenda = falhou.motivo;
+        registrar('Legenda: ' + falhou.motivo + '. Sigo pelo título.');
+      } else {
+        registrar('Vou até a página de Idiomas ler a legenda do corte e já volto sozinho (não salvo nada).');
+        GM_setValue('pf-ir-legenda', idVideo); GM_setValue('pf-ir-legenda-t0', Date.now()); GM_setValue('pf-ir-legenda-espera', '');
+        status('Indo ler a legenda na página de Idiomas… volto sozinho para Detalhes.');
+        await espera(600);
+        location.href = '/video/' + idVideo + '/translations';
+        await espera(60000); // a página troca antes disso
+        return;
       }
     } else { motivoLegenda = 'não achei o código do vídeo'; registrar('Não achei o código do vídeo para ler a legenda.'); }
     ultimasFrases = segs;
@@ -1916,11 +1939,21 @@
   }
 
   // O Studio é uma página que troca de tela sem recarregar: confere de tempos em tempos.
+  let autoNaLegenda = false;
   let transcricaoArquivo = null; // { id, nome, dados } — arquivo .srt/.txt escolhido para o vídeo aberto
   let falhouMontar = false;
   setInterval(() => {
     if (!document.body) return;
     try { montar(); } catch (e) { if (!falhouMontar) { falhouMontar = true; console.error('[Produtos Flow] não consegui montar o botão:', e); } }
+    // foi mandado à página de Idiomas para ler a legenda: começa sozinho quando a página carregar
+    try {
+      const ir = GM_getValue('pf-ir-legenda', '');
+      if (ir && !ocupado && location.pathname.includes('/video/' + ir + '/translations') && document.getElementById('pf-painel') && !autoNaLegenda) {
+        autoNaLegenda = true;
+        document.getElementById('pf-painel').classList.add('aberto');
+        setTimeout(() => rodar(etapaProdutos), 2500);
+      }
+    } catch {}
     // voltou da página de Idiomas com a legenda guardada: abre o painel e começa sozinho quando os Detalhes carregarem
     try {
       const cont = GM_getValue('pf-continuar', '');
