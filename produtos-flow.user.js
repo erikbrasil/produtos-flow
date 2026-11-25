@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Produtos Flow — marcar produtos no YouTube Studio
 // @namespace    produtos-flow.cortes
-// @version      1.14.0
+// @version      1.14.1
 // @description  Escolhe produtos ligados ao convidado e ao assunto do corte, marca no Studio, distribui os tempos e PARA para conferência humana. Não salva nada sozinho. Sem IA.
 // @match        https://studio.youtube.com/*
 // @grant        GM_xmlhttpRequest
@@ -32,7 +32,7 @@
 
 (function () {
   'use strict';
-  const VERSAO = '1.14.0';
+  const VERSAO = '1.14.1';
 
   // ====================================================================================
   //  LISTAS — para acrescentar convidado ou tema, copie um bloco e troque os textos.
@@ -1140,6 +1140,20 @@
 
   // ---------- etapa 1: escolher e marcar ----------
   async function etapaProdutos() {
+    // aberto na página "Idiomas/Legendas": lê a legenda daqui mesmo, guarda e volta para Detalhes
+    const naLegenda = location.pathname.match(/\/video\/([A-Za-z0-9_-]{11})\/translations/);
+    if (naLegenda) {
+      registrar('Você está na página de Idiomas: vou ler a legenda daqui e voltar para Detalhes.');
+      const r = await lerLegendaNoQuadro(document, window);
+      GM_setValue('legenda:' + naLegenda[1], JSON.stringify({ ...r, t: Date.now() }));
+      try { document.querySelectorAll('ytve-captions-editor-modal, tp-yt-paper-dialog').forEach(d => d.style && (d.style.display = 'none')); } catch {}
+      GM_setValue('pf-continuar', naLegenda[1]);
+      status('Legenda guardada (' + r.segs.length + ' frases). Voltando para Detalhes… (não salvei nada)');
+      await espera(800);
+      location.href = '/video/' + naLegenda[1] + '/edit';
+      await espera(60000); // a página recarrega antes disso
+      return;
+    }
     const titulo = (await lerTitulo()).trim();
     const descricao = textoDe(campo('descricao'));
     if (!titulo) throw Error('Abra a página de detalhes do vídeo (ou o rascunho) antes de começar — não achei o título (nem no teste A/B).');
@@ -1506,7 +1520,10 @@
     const ate = async (fn, ms) => { const t0 = Date.now(); while (Date.now() - t0 < ms) { if (parar) throw Error('parado por você'); const r = fn(); if (r) return r; await espera(400); } return null; };
     const tq = sel => raizes(doc).flatMap(r => [...r.querySelectorAll(sel)]);
     const vis = el => !!el && el.getClientRects().length > 0 && win.getComputedStyle(el).visibility !== 'hidden';
-    const btnTexto = re => tq('ytcp-button, button, tp-yt-paper-button').filter(vis).find(b => re.test((b.textContent || '').trim()));
+    const btnTexto = re => {
+      const todosBtn = tq('ytcp-button, button, tp-yt-paper-button').filter(b => re.test((b.textContent || '').replace(/\s+/g, ' ').trim()));
+      return todosBtn.find(vis) || todosBtn.find(b => !b.hasAttribute('disabled') && b.getAttribute('aria-disabled') !== 'true') || null;
+    };
     const textoPagina = () => ((doc.body && doc.body.innerText) || '').replace(/\s+/g, ' ');
     const erroGerando = () => { const e = Error('o YouTube ainda está gerando a legenda automática deste corte'); e.gerando = true; return e; };
     const ehGerando = () => /Gerando legendas autom|Generating automatic|depois que as legendas forem geradas|after (the )?(subtitles|captions) are generated|Processando|Processing|Enviando v|Uploading/i.test(textoPagina());
@@ -1517,7 +1534,8 @@
       if (/Algo deu errado|Something went wrong/i.test(txt)) { const e = Error('a página de legendas deu erro ("Algo deu errado")'); e.tentarDeNovo = true; throw e; }
       if (/Adicionar legenda|Add subtitles|Adicionar idioma|Add language/i.test(txt)) throw Error('o vídeo ainda não tem legenda automática (o YouTube demora um pouco depois do envio)');
       const erro = txt.match(/(Ocorreu um erro|Algo deu errado|erro|não encontrad)[^.]{0,80}/i);
-      throw Error('não achei o botão "Editar legendas"' + (erro ? ' — a página disse: ' + erro[0] : ''));
+      const nomesBtn = [...new Set(tq('ytcp-button, button').map(b => (b.textContent || '').replace(/\s+/g, ' ').trim()).filter(t => t && t.length < 40))].slice(0, 12).join(' | ');
+      throw Error('não achei o botão "Editar legendas"' + (erro ? ' — a página disse: ' + erro[0] : '') + ' [botões na página: ' + (nomesBtn || 'nenhum') + ']');
     }
     editar.click();
     // o editor abre com a transcrição inteira numa caixa de texto (com pontuação). Só lê; nada é salvo.
@@ -1543,7 +1561,8 @@
     if (guardada) { try { const j = JSON.parse(guardada); if (j.ok && j.segs?.length) return j; } catch {} }
     const q = document.createElement('iframe');
     q.setAttribute('aria-hidden', 'true'); q.tabIndex = -1;
-    q.style.cssText = 'position:fixed;left:-4000px;top:0;width:1280px;height:900px;opacity:0;pointer-events:none;border:0;';
+    // dentro da tela, mas atrás de tudo e transparente: alguns navegadores (Opera GX) nem desenham o que fica fora da tela
+    q.style.cssText = 'position:fixed;left:0;top:0;width:1280px;height:900px;opacity:0.001;pointer-events:none;border:0;z-index:-2147483647;';
     q.src = '/video/' + id + '/translations';
     document.body.appendChild(q);
     try {
@@ -1902,6 +1921,15 @@
   setInterval(() => {
     if (!document.body) return;
     try { montar(); } catch (e) { if (!falhouMontar) { falhouMontar = true; console.error('[Produtos Flow] não consegui montar o botão:', e); } }
+    // voltou da página de Idiomas com a legenda guardada: abre o painel e começa sozinho quando os Detalhes carregarem
+    try {
+      const cont = GM_getValue('pf-continuar', '');
+      if (cont && !ocupado && location.pathname.includes('/video/' + cont + '/edit') && document.getElementById('pf-painel') && campo('titulo')) {
+        GM_setValue('pf-continuar', '');
+        document.getElementById('pf-painel').classList.add('aberto');
+        rodar(etapaProdutos);
+      }
+    } catch {}
   }, 1500);
   console.info('[Produtos Flow] v' + VERSAO + ' carregado');
 })();
