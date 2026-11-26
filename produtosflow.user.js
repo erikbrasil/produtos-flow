@@ -1,13 +1,14 @@
 // ==UserScript==
 // @name         Produtos Flow — marcar produtos no YouTube Studio
 // @namespace    produtos-flow.cortes
-// @version      1.15.0
+// @version      1.16.0
 // @description  Escolhe produtos ligados ao convidado e ao assunto do corte, marca no Studio, distribui os tempos e PARA para conferência humana. Não salva nada sozinho. Sem IA.
 // @match        https://studio.youtube.com/*
 // @grant        GM_xmlhttpRequest
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_setClipboard
+// @grant        unsafeWindow
 // @connect      www.youtube.com
 // @connect      pt.wikipedia.org
 // @run-at       document-idle
@@ -32,7 +33,7 @@
 
 (function () {
   'use strict';
-  const VERSAO = '1.15.0';
+  const VERSAO = '1.16.0';
 
   // ====================================================================================
   //  LISTAS — para acrescentar convidado ou tema, copie um bloco e troque os textos.
@@ -905,45 +906,33 @@
   function planoPorFala(duracao, prefs) {
     if (!Number.isFinite(duracao)) throw Error('Duração do vídeo não encontrada.');
     const fim = Math.floor(duracao) - 1, n = prefs.length;
-    if (fim - 30 < TEMPO_MIN) throw Error('Vídeo curto demais para marcar tempos.');
-    if (n * TEMPO_MIN > fim - 30) throw Error('Não cabem ' + n + ' tempos de pelo menos ' + TEMPO_MIN + ' segundos neste vídeo.');
-    const lim = t => Math.max(30, Math.min(fim - TEMPO_MIN, Math.floor(t)));
-    const pos = []; // { linha, inicio }
-    const ocupado = t => pos.some(x => Math.abs(x.inicio - t) < TEMPO_MIN);
-    const comMomento = prefs.map((t, linha) => ({ t, linha })).filter(x => Number.isFinite(x.t)).sort((a, b) => a.t - b.t);
-    const sobra = prefs.map((t, linha) => ({ t, linha })).filter(x => !Number.isFinite(x.t)).map(x => x.linha);
-    for (const { t, linha } of comMomento) {
-      // se outro produto já está nesse ponto, empurra no máximo 30 s; passou disso, vai tapar buraco
-      let ini = lim(t);
-      const teto = Math.min(fim - TEMPO_MIN, ini + 30);
-      while (ocupado(ini) && ini < teto) ini++;
-      if (ocupado(ini)) sobra.push(linha); else pos.push({ linha, inicio: ini });
+    const util = fim - 30;
+    if (util < TEMPO_MIN) throw Error('Vídeo curto demais para marcar tempos.');
+    if (n * TEMPO_MIN > util) throw Error('Não cabem ' + n + ' tempos de pelo menos ' + TEMPO_MIN + ' segundos neste vídeo.');
+    // 1) momento desejado de cada produto: o falado; os sem momento vão para o meio dos maiores vãos entre os falados
+    const desejo = prefs.map(t => (Number.isFinite(t) ? Math.max(30, Math.min(fim, t)) : null));
+    const sem = desejo.map((d, i) => (d === null ? i : -1)).filter(i => i >= 0);
+    for (const i of sem) {
+      const marcos = [30, ...desejo.filter(d => d !== null).sort((x, y) => x - y), fim];
+      let melhor = 0;
+      for (let k = 1; k < marcos.length; k++) if (marcos[k] - marcos[k - 1] > marcos[melhor + 1] - marcos[melhor]) melhor = k - 1;
+      desejo[i] = (marcos[melhor] + marcos[melhor + 1]) / 2;
     }
-    for (const linha of sobra) {
-      pos.sort((a, b) => a.inicio - b.inicio);
-      // maior pedaço do vídeo que ninguém cobre (cada produto cobre até 60 s)
-      let melhor = null;
-      const marcos = [{ inicio: 30, vazio: true }, ...pos];
-      for (let i = 0; i < marcos.length; i++) {
-        const desde = marcos[i].vazio ? 30 : marcos[i].inicio + TEMPO_MAX;
-        const ate = i + 1 < marcos.length ? marcos[i + 1].inicio : fim;
-        const ini = marcos[i].vazio ? 30 : Math.min(desde, ate);
-        if (ate - ini >= TEMPO_MIN && !ocupado(ini) && (!melhor || ate - desde > melhor.vao)) melhor = { ini, vao: ate - desde };
-      }
-      if (!melhor || melhor.vao <= 0) {
-        // vídeo já coberto: divide o trecho mais comprido ao meio
-        let maior = null;
-        for (let i = 0; i < pos.length; i++) {
-          const ate = Math.min(pos[i].inicio + TEMPO_MAX, i + 1 < pos.length ? pos[i + 1].inicio : fim);
-          if (ate - pos[i].inicio >= 2 * TEMPO_MIN && (!maior || ate - pos[i].inicio > maior.tam)) maior = { ini: Math.floor((pos[i].inicio + ate) / 2), tam: ate - pos[i].inicio };
-        }
-        if (!maior && !melhor) throw Error('Não sobrou lugar para todos os tempos.');
-        melhor = maior || melhor;
-      }
-      pos.push({ linha, inicio: melhor.ini });
+    const ordem = desejo.map((d, linha) => ({ d, linha })).sort((x, y) => x.d - y.d);
+    // 2) posições
+    let inicios;
+    if (n * TEMPO_MAX >= util) {
+      // produtos suficientes: vídeo todo coberto, sem buraco, na ordem em que as coisas são faladas
+      const L = util / n;
+      inicios = ordem.map((_, i) => Math.round(30 + i * L));
+    } else {
+      // poucos produtos: cada um fica 1 minuto inteiro, o mais perto possível de quando é falado, sem encavalar
+      inicios = ordem.map(o => o.d);
+      for (let i = 0; i < n; i++) inicios[i] = Math.max(inicios[i], i ? inicios[i - 1] + TEMPO_MAX : 30);
+      for (let i = n - 1; i >= 0; i--) inicios[i] = Math.min(inicios[i], i < n - 1 ? inicios[i + 1] - TEMPO_MAX : fim - TEMPO_MAX);
+      for (let i = 0; i < n; i++) inicios[i] = Math.round(Math.max(inicios[i], i ? inicios[i - 1] + TEMPO_MAX : 30));
     }
-    pos.sort((a, b) => a.inicio - b.inicio);
-    return pos.map((x, i) => ({ indice: i, linha: x.linha, inicio: x.inicio, fim: Math.min(x.inicio + TEMPO_MAX, pos[i + 1] ? pos[i + 1].inicio : fim, fim) }));
+    return ordem.map((o, i) => ({ indice: i, linha: o.linha, inicio: inicios[i], fim: Math.min(inicios[i] + TEMPO_MAX, i + 1 < n ? inicios[i + 1] : fim, fim) }));
   }
   function cobertura(plano, duracao) {
     const coberto = plano.reduce((t, p) => t + (p.fim - p.inicio), 0);
@@ -1196,6 +1185,7 @@
     let transcricao = '', segs = null, motivoLegenda = '';
     const idVideo = idDoVideo();
     if (transcricaoArquivo && transcricaoArquivo.id !== (idVideo || location.pathname)) transcricaoArquivo = null; // era de outro vídeo
+    if (!transcricaoArquivo) { try { await carregarDaPasta(false); } catch (e) { registrar('Pasta das transcrições: ' + e.message); } }
     if (transcricaoArquivo) {
       const durs0 = todos('video').map(v => v.duration).filter(n => Number.isFinite(n) && n > 0);
       const dur = durs0.length ? Math.max(...durs0) : 0;
@@ -1608,6 +1598,84 @@
     lista = [...nomes.map(n => ({ n, t: Date.now() })), ...lista.filter(x => !nomes.some(n => repetido(n, x.n)))].slice(0, 60);
     GM_setValue('recentes', JSON.stringify(lista));
   }
+  // ===== Pasta das transcrições (escolhida uma vez; guardada no navegador) =====
+  const janela = (typeof unsafeWindow !== 'undefined' && unsafeWindow) || window;
+  function bancoPasta() {
+    return new Promise((ok, erro) => {
+      const r = janela.indexedDB.open('produtos-flow', 1);
+      r.onupgradeneeded = () => r.result.createObjectStore('kv');
+      r.onsuccess = () => ok(r.result); r.onerror = () => erro(r.error);
+    });
+  }
+  async function guardarPasta(h) { const db = await bancoPasta(); await new Promise((ok, erro) => { const t = db.transaction('kv', 'readwrite'); t.objectStore('kv').put(h, 'pasta'); t.oncomplete = ok; t.onerror = () => erro(t.error); }); }
+  async function lerPasta() { try { const db = await bancoPasta(); return await new Promise(ok => { const t = db.transaction('kv', 'readonly'); const g = t.objectStore('kv').get('pasta'); g.onsuccess = () => ok(g.result || null); g.onerror = () => ok(null); }); } catch { return null; } }
+  async function escolherPasta() {
+    if (!janela.showDirectoryPicker) throw Error('este navegador não deixa escolher pasta (use Chrome, Edge ou Opera)');
+    const h = await janela.showDirectoryPicker({ id: 'produtos-flow-transcricoes', mode: 'read' });
+    await guardarPasta(h);
+    return h;
+  }
+  // pede permissão de leitura (precisa ser chamado logo no clique do botão)
+  async function permissaoPasta(h) {
+    if (!h) return false;
+    try {
+      if ((await h.queryPermission({ mode: 'read' })) === 'granted') return true;
+      return (await h.requestPermission({ mode: 'read' })) === 'granted';
+    } catch { return false; }
+  }
+  function nomeArquivoDoVideo() {
+    const e = umVisivel(todos('#original-filename')) || todos('#original-filename')[0];
+    const t = e ? (e.textContent || '').trim() : '';
+    return t.replace(/\.(mp4|mov|mkv|avi|webm|m4v)$/i, '');
+  }
+  // acha na pasta (e subpastas, até 2 níveis) o arquivo de transcrição do vídeo: mesmo nome do arquivo enviado
+  async function acharTranscricaoNaPasta(h, base, titulo) {
+    const alvoN = norm(base || ''), tituloN = norm(titulo || '');
+    const palavras = t => new Set(norm(t).split(' ').filter(w => w.length >= 3));
+    const pa = palavras(base || titulo || '');
+    const achados = [];
+    const varre = async (dir, nivel) => {
+      for await (const [nome, item] of dir.entries()) {
+        if (item.kind === 'directory') { if (nivel < 2 && !/^(\.|node_modules|\$)/.test(nome)) await varre(item, nivel + 1); continue; }
+        if (!/\.(srt|vtt|txt)$/i.test(nome)) continue;
+        const semExt = nome.replace(/\.(transcricao\.)?(srt|vtt|txt)$/i, '').replace(/\.transcricao$/i, '');
+        const n = norm(semExt);
+        let nota = 0;
+        if (alvoN && n === alvoN) nota = 100;
+        else if (alvoN && (n.startsWith(alvoN) || alvoN.startsWith(n)) && n.length > 5) nota = 85;
+        else if (tituloN && n === tituloN) nota = 80;
+        else {
+          const pb = palavras(semExt); let comum = 0; for (const w of pb) if (pa.has(w)) comum++;
+          const frac = pa.size ? comum / Math.max(pa.size, pb.size) : 0;
+          if (frac >= 0.6) nota = 50 + Math.round(frac * 20);
+        }
+        if (nota) { if (/\.srt$/i.test(nome)) nota += 3; else if (/\.vtt$/i.test(nome)) nota += 2; achados.push({ nome, item, nota }); }
+      }
+    };
+    await varre(h, 0);
+    if (!achados.length) return null;
+    for (const a of achados) { try { a.data = (await a.item.getFile()).lastModified; } catch { a.data = 0; } }
+    achados.sort((x, y) => y.nota - x.nota || y.data - x.data);
+    const f = await achados[0].item.getFile();
+    return { nome: achados[0].nome, texto: await f.text() };
+  }
+  // usada no Começar e no botão "Procurar transcrição"
+  async function carregarDaPasta(avisar) {
+    const h = await lerPasta();
+    if (!h) { if (avisar) status('Escolha antes a pasta das transcrições (botão 📁).'); return false; }
+    if (!(await permissaoPasta(h))) { registrar('Sem permissão para ler a pasta "' + h.name + '".'); return false; }
+    const base = nomeArquivoDoVideo();
+    const titulo = await lerTitulo().catch(() => '');
+    const r = await acharTranscricaoNaPasta(h, base, titulo);
+    if (!r) { registrar('Pasta "' + h.name + '": não achei transcrição com o nome do vídeo' + (base ? ' ("' + base + '")' : '') + '.'); if (avisar) status('Não achei na pasta "' + h.name + '" uma transcrição com o nome do vídeo' + (base ? ': ' + base : '') + '.'); return false; }
+    const dados = lerArquivoTranscricao(r.texto);
+    if (!dados) { registrar('O arquivo "' + r.nome + '" não parece transcrição.'); return false; }
+    transcricaoArquivo = { id: idDoVideo() || location.pathname, nome: r.nome, dados };
+    registrar('Transcrição achada na pasta "' + h.name + '": ' + r.nome);
+    if (avisar) status('Achei: ' + r.nome + ' (' + dados.segs.length + ' trechos). Pode clicar em Começar.');
+    try { const rot = document.getElementById('pf-rot-arquivo'); if (rot) rot.textContent = '✔ ' + r.nome; } catch {}
+    return true;
+  }
   function idDoVideo() {
     const m = location.href.match(/\/video\/([A-Za-z0-9_-]{11})/) || location.href.match(/[?&]udvid=([A-Za-z0-9_-]{11})/);
     if (m) return m[1];
@@ -1713,7 +1781,12 @@
     // transcrição de arquivo
     const entradaArquivo = el('input', { type: 'file', accept: '.srt,.vtt,.txt,text/plain', style: 'display:none' });
     const botaoArquivo = el('button', { class: 'pf sec', id: 'pf-arquivo' }, '📄 Usar transcrição de arquivo');
-    const rotuloArquivo = el('span', { style: 'color:#aaa;font-size:11px' }, '');
+    const rotuloArquivo = el('span', { style: 'color:#aaa;font-size:11px', id: 'pf-rot-arquivo' }, '');
+    const botaoPasta = el('button', { class: 'pf sec', id: 'pf-pasta' }, '📁 Pasta das transcrições');
+    const botaoProcurar = el('button', { class: 'pf sec', id: 'pf-procurar' }, '🔎 Procurar transcrição');
+    lerPasta().then(h => { if (h) botaoPasta.textContent = '📁 Pasta: ' + h.name; }).catch(() => {});
+    botaoPasta.onclick = () => { escolherPasta().then(h => { botaoPasta.textContent = '📁 Pasta: ' + h.name; status('Pasta guardada: ' + h.name + '. No Começar eu procuro a transcrição lá.'); }).catch(e => { if (e && e.name !== 'AbortError') status('Não consegui usar a pasta: ' + e.message); }); };
+    botaoProcurar.onclick = () => { lerPasta().then(h => (h ? permissaoPasta(h) : false)).finally(() => carregarDaPasta(true).catch(e => status('Erro ao procurar: ' + e.message))); };
     const mostrarArquivo = () => { rotuloArquivo.textContent = transcricaoArquivo ? '✔ ' + transcricaoArquivo.nome + ' (' + transcricaoArquivo.dados.segs.length + ' trechos) — clique de novo para trocar' : ''; };
     botaoArquivo.onclick = () => { entradaArquivo.value = ''; entradaArquivo.click(); };
     entradaArquivo.onchange = () => {
@@ -1735,8 +1808,9 @@
         el('div', { id: 'pf-status' }, 'Abra o vídeo (detalhes) ou o rascunho e clique em Começar.'),
         el('label', { style: 'display:block;margin-top:8px' }, 'Assunto do corte (opcional): ', dica),
         el('div', { style: 'color:#888;font-size:11px' }, 'Ex.: vício, felicidade · STF · drift, Japão. Vem antes de tudo na busca.'),
-        el('div', { style: 'margin-top:8px' }, botaoArquivo, ' ', rotuloArquivo, entradaArquivo),
-        el('div', { style: 'color:#888;font-size:11px' }, 'Opcional: .srt/.txt exportado do Premiere ou do programa de transcrição. Com ele não precisa esperar a legenda do YouTube.'),
+        el('div', { style: 'margin-top:8px' }, botaoPasta, ' ', botaoProcurar),
+        el('div', { style: 'margin-top:4px' }, botaoArquivo, ' ', rotuloArquivo, entradaArquivo),
+        el('div', { style: 'color:#888;font-size:11px' }, 'Escolha UMA VEZ a pasta onde ficam as transcrições (.srt/.txt com o mesmo nome do vídeo). No Começar eu procuro lá sozinho; se não achar, uso a legenda do YouTube.'),
         el('div', { id: 'pf-acoes' })),
       el('section', { id: 'pf-det', style: 'display:none' }),
       el('section', { id: 'pf-conf', style: 'display:none' }),
@@ -1781,7 +1855,10 @@
   const btn = (txt, fn, classe = '') => el('button', { class: 'pf ' + classe, onclick: fn }, txt);
 
   function acoesInicio() {
-    acoes(btn('▶ Começar', () => rodar(etapaProdutos)));
+    acoes(btn('▶ Começar', () => {
+      // permissão da pasta tem de ser pedida no próprio clique
+      lerPasta().then(h => (h ? permissaoPasta(h) : false)).catch(() => false).finally(() => rodar(etapaProdutos));
+    }));
     document.getElementById('pf-conf').style.display = 'none';
   }
   function acoesRodando() { acoes(btn('■ Parar', () => { parar = true; status('Parando…'); }, 'perigo')); }
