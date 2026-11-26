@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Produtos Flow — marcar produtos no YouTube Studio
 // @namespace    produtos-flow.cortes
-// @version      1.17.0
+// @version      1.18.0
 // @description  Escolhe produtos ligados ao convidado e ao assunto do corte, marca no Studio, distribui os tempos e PARA para conferência humana. Não salva nada sozinho. Sem IA.
 // @match        https://studio.youtube.com/*
 // @grant        GM_xmlhttpRequest
@@ -33,7 +33,7 @@
 
 (function () {
   'use strict';
-  const VERSAO = '1.17.0';
+  const VERSAO = '1.18.0';
 
   // ====================================================================================
   //  LISTAS — para acrescentar convidado ou tema, copie um bloco e troque os textos.
@@ -777,6 +777,13 @@
       fila.push({ busca: 'livro ' + d, exige: ex, recusa: RECUSA_LIVRO, origem: 'citado', rotulo: 'assunto digitado', chaves: fortes });
       fila.push({ busca: d, exige: ex, recusa: ['adesivo', 'capinha', 'case', 'pelicula'], origem: 'citado', rotulo: 'assunto digitado', chaves: fortes });
     }
+    // produtos que vocês já aprovaram neste episódio / convidado / assunto
+    for (const a of det.aprovados || []) {
+      const busca = a.nome.split(/[|:(\-–]/)[0].trim().slice(0, 60);
+      const fortes = palavrasFortes(busca).slice(0, 3);
+      if (!fortes.length) continue;
+      fila.push({ busca, exige: fortes.map(w => [w]), recusa: [], origem: 'aprovado', rotulo: 'aprovado antes', chaves: fortes });
+    }
     // livros citados na fala (legenda do Studio)
     for (const l of det.livros || []) {
       const fortes = palavrasFortes(l.titulo).slice(0, 4);
@@ -896,6 +903,7 @@
       };
       pega(achados.filter(p => p.origem === 'citado' && p.rotulo === 'assunto digitado'), alvo);
       pega(achados.filter(p => p.origem === 'citado' && p.rotulo === 'livro citado na fala'), alvo);
+      pega(achados.filter(p => p.origem === 'aprovado'), Math.min(alvo, out.length + 4)); // já aprovados por vocês
       // convidado que É o produto (Vinheteiro → teclado/piano): até 4 vagas, logo no começo
       pega(achados.filter(p => p.origem === 'convidado-produto'), Math.min(alvo, out.length + 4));
       pega(achados.filter(p => p.origem === 'fala'), alvo);      // o que o corte mais fala
@@ -995,6 +1003,8 @@
   const listaCoringas = () => cfg.coringas.split(/\r?\n/).map(x => x.trim()).filter(Boolean);
   const log = [];
   let ocupado = false, parar = false, etapa = 'inicio', ultimaDeteccao = null, ultimosEscolhidos = [], ultimosCandidatos = [], ultimaCobertura = null, ultimasFrases = null;
+  // estado da prévia: todos os achados, buscas puladas, alternativas por busca, duração e chaves de aprendizado
+  let previa = { achados: [], pulados: [], alternativas: new Map(), duracao: NaN, faltam: 0, jaTem: 0, recentes: [], chaves: [], segs: null };
 
   const espera = ms => new Promise(r => setTimeout(r, ms));
   const humano = () => espera(450 + Math.random() * 500);
@@ -1088,7 +1098,9 @@
         if (botoes.length === 1 && nome) {
           const marcado = (botoes[0].getAttribute('aria-label') || botoes[0].getAttribute('title') || '').trim() === 'Excluir marcação';
           const texto = raizes(escopo).map(r => r.textContent || '').join(' ');
-          return { el, nome, botao: botoes[0], marcado, indisponivel: INDISPONIVEL.test(texto) || !habilitado(botoes[0]) };
+          const img = raizes(escopo).flatMap(r => [...r.querySelectorAll('img')]).map(i => i.currentSrc || i.src || '').find(u => /^(https?:|data:image)/.test(u)) || '';
+          const loja = (texto.match(/Amazon(?: Brazil| Brasil)?|Shopee|Mercado Livre|Magalu|Magazine Luiza|Americanas|Submarino|Kabum|KaBuM!?|Netshoes|AliExpress|Casas Bahia|Centauro|Shein|Temu/i) || [''])[0];
+          return { el, nome, botao: botoes[0], marcado, indisponivel: INDISPONIVEL.test(texto) || !habilitado(botoes[0]), img, loja };
         }
       }
       return { el, nome, botao: null };
@@ -1147,6 +1159,54 @@
     return linhasDeProduto(painel);
   }
 
+  // Busca com memória de 1 dia: cortes do mesmo episódio repetem muita busca. A marcação sempre busca de verdade.
+  const VALIDADE_BUSCA = 24 * 3600 * 1000;
+  async function buscarComCache(painel, q) {
+    const chave = 'busca:' + norm(q.busca);
+    let linhas = null, guardada = false;
+    try { const g = JSON.parse(GM_getValue(chave, '') || 'null'); if (g && Date.now() - g.t < VALIDADE_BUSCA) { linhas = g.linhas; guardada = true; } } catch {}
+    if (!linhas) {
+      registrar('Buscando: ' + q.busca);
+      const vivas = await buscar(painel, q.busca);
+      linhas = vivas.filter(l => !l.indisponivel).map(l => ({ nome: l.nome, img: l.img || '', loja: l.loja || '', marcado: !!l.marcado }));
+      try { GM_setValue(chave, JSON.stringify({ t: Date.now(), linhas: linhas.map(({ marcado, ...x }) => x) })); } catch {}
+      await humano();
+    } else registrar('Busca guardada: ' + q.busca);
+    const aceitos = [];
+    for (const l of linhas) {
+      if (l.marcado || !aceita(l.nome, q)) continue;
+      aceitos.push({ nome: l.nome, img: l.img, loja: l.loja, busca: q.busca, origem: q.origem, rotulo: q.rotulo, chaves: q.chaves || [], tempo: q.tempo });
+    }
+    previa.alternativas.set(q.busca, aceitos);
+    registrar('  ' + q.busca + ': ' + linhas.length + ' resultado(s), ' + aceitos.length + ' servem' + (guardada ? ' (guardada)' : ''));
+    return { total: linhas.length, aceitos, guardada };
+  }
+  // Aprendizado: o que vocês aprovam fica guardado por episódio, convidado e assunto (neste navegador)
+  function chavesDeAprendizado(det, idEpisodio) {
+    const c = [];
+    if (idEpisodio) c.push('ep:' + idEpisodio);
+    for (const g of (det.convidados || []).slice(0, 2)) c.push('conv:' + norm(g.nome));
+    for (const a of (det.assuntos || []).slice(0, 3)) c.push('assunto:' + norm(a.buscas[0][0]));
+    for (const t of (det.temas || []).filter(t => t.doCorte).slice(0, 2)) c.push('tema:' + t.id);
+    return c;
+  }
+  function lerAprovados(chaves) {
+    let banco = {}; try { banco = JSON.parse(GM_getValue('aprovados', '{}')); } catch {}
+    const out = [];
+    for (const k of chaves) for (const x of (banco[k] || [])) if (!out.some(o => repetido(o.nome, x.nome))) out.push({ ...x, chave: k });
+    return out.slice(0, 8);
+  }
+  function guardarAprovados(chaves, produtos) {
+    if (!chaves.length || !produtos.length) return;
+    let banco = {}; try { banco = JSON.parse(GM_getValue('aprovados', '{}')); } catch {}
+    for (const k of chaves) {
+      const lista = banco[k] || [];
+      for (const p of produtos) { const i = lista.findIndex(x => repetido(x.nome, p.nome)); if (i >= 0) lista.splice(i, 1); lista.unshift({ nome: p.nome, busca: p.busca, t: Date.now() }); }
+      banco[k] = lista.slice(0, 12);
+    }
+    const ks = Object.keys(banco); if (ks.length > 300) for (const k of ks.slice(0, ks.length - 300)) delete banco[k];
+    GM_setValue('aprovados', JSON.stringify(banco));
+  }
   async function marcarUm(painel, linha) {
     const antes = contagemMarcados(painel);
     linha.botao.scrollIntoView({ block: 'center' });
@@ -1273,6 +1333,9 @@
     mostrarDeteccao();
 
     det.semente = [...(idVideo || titulo)].reduce((h, ch) => (h * 31 + ch.charCodeAt(0)) >>> 0, 7);
+    previa.chaves = chavesDeAprendizado(det, idEp || '');
+    det.aprovados = lerAprovados(previa.chaves);
+    if (det.aprovados.length) registrar('Aprovados antes (episódio/convidado/assunto): ' + det.aprovados.map(a => a.nome.slice(0, 40)).join('; '));
     if (det.assuntos && det.assuntos.length) registrar('Assuntos da fala: ' + det.assuntos.map(a => palavrasFortes(a.buscas[0][0]).slice(0, 3).join(' ') + (Number.isFinite(a.tempo) ? ' (' + mmss(a.tempo) + ')' : '')).join('; '));
     const recentes = lerRecentes();
     if (recentes.length) registrar('Produtos dos últimos cortes ficam por último (' + recentes.length + ' na lista).');
@@ -1293,29 +1356,23 @@
     }
     const faltam = Math.max(0, alvo - jaTem);
 
-    const achados = []; const resumoBuscas = [];
+    const achados = []; const resumoBuscas = []; const pulados = [];
+    previa.alternativas = new Map();
     for (const q of plano) {
       if (parar) throw Error('Parado por você.');
       // para quando já há candidatos de sobra
       // já tem candidato de sobra: pula as listas fixas (assunto, convidado, coringa), mas sempre
       // busca o que veio da fala, do que foi citado e do título do corte
-      if (!['fala', 'citado', 'titulo', 'convidado-produto'].includes(q.origem) && escolher(achados, faltam, recentes).length >= faltam && achados.length >= faltam + 3) continue;
-      registrar('Buscando: ' + q.busca);
-      const linhas = await buscar(painel, q.busca);
-      let bons = 0;
-      for (const l of linhas) {
-        if (l.marcado || l.indisponivel) continue;
-        if (!aceita(l.nome, q)) continue;
-        achados.push({ nome: l.nome, busca: q.busca, origem: q.origem, rotulo: q.rotulo, chaves: q.chaves || [], tempo: q.tempo }); bons++;
-      }
-      resumoBuscas.push({ busca: q.busca, resultados: linhas.length, aceitos: bons });
-      registrar('  ' + q.busca + ': ' + linhas.length + ' resultado(s), ' + bons + ' servem');
-      await humano();
+      if (!['fala', 'citado', 'titulo', 'convidado-produto', 'aprovado'].includes(q.origem) && escolher(achados, faltam, recentes).length >= faltam && achados.length >= faltam + 3) { pulados.push(q); continue; }
+      const r = await buscarComCache(painel, q);
+      for (const a of r.aceitos) achados.push(a);
+      resumoBuscas.push({ busca: q.busca, resultados: r.total, aceitos: r.aceitos.length, guardada: r.guardada || undefined });
     }
     ultimaDeteccao.buscas = resumoBuscas;
     // PRÉVIA: mostra as sugestões (as primeiras já marcadas) e espera você escolher
     const candidatos = escolher(achados, faltam + 6, recentes);
     for (const c of candidatos) if (!Number.isFinite(c.tempo)) c.tempo = momentoNaFala(segs, c.chaves);
+    Object.assign(previa, { achados, pulados, duracao: duracaoVideo, faltam, jaTem, recentes, segs });
     ultimosCandidatos = candidatos;
     etapa = 'previa';
     registrar('PRÉVIA: ' + candidatos.length + ' sugestão(ões). Escolha quais marcar.');
@@ -1343,6 +1400,7 @@
     }
     ultimosEscolhidos = marcados;
     guardarRecentes(marcados.map(p => p.nome));
+    try { guardarAprovados(previa.chaves, marcados); } catch {}
     const total = contagemMarcados(painel);
     etapa = 'conferir-produtos';
     const pouco = (total ?? 0) < cfg.minimo;
@@ -1798,6 +1856,7 @@
   .pf-card{display:flex;gap:11px;align-items:center;padding:9px 11px;border-radius:18px;cursor:pointer;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.12);box-shadow:inset 0 1px 0 rgba(255,255,255,.15);transition:background .2s,border-color .2s,transform .12s;user-select:none}
   .pf-card:active{transform:scale(.98)}
   .pf-card.on{background:linear-gradient(160deg,rgba(10,132,255,.32),rgba(10,132,255,.14));border-color:rgba(100,181,255,.65);box-shadow:inset 0 1px 0 rgba(255,255,255,.3),0 4px 14px rgba(10,132,255,.18)}
+  #pf-painel label.pf-card{display:flex;margin-right:0;width:100%}
   .pf-card input{display:none}
   .pf-ck{width:24px;height:24px;border-radius:50%;flex:none;display:grid;place-items:center;font-size:14px;color:transparent;border:1.6px solid rgba(255,255,255,.45);transition:all .2s}
   .pf-card.on .pf-ck{background:#0a84ff;border-color:#0a84ff;color:#fff;box-shadow:inset 0 1px 0 rgba(255,255,255,.45)}
@@ -1806,6 +1865,20 @@
   .pf-rodape{display:flex;justify-content:center;gap:16px;margin-top:4px;font-size:12px}
   .pf-rodape button{background:none;border:0;color:rgba(235,235,245,.7);cursor:pointer;font:inherit;padding:4px}
   .pf-rodape button:hover{color:#fff}
+  .pf-foto{width:36px;height:46px;border-radius:8px;flex:none;overflow:hidden;background:linear-gradient(160deg,rgba(255,255,255,.28),rgba(255,255,255,.10));box-shadow:inset 0 1px 0 rgba(255,255,255,.35)}
+  .pf-foto img{width:100%;height:100%;object-fit:cover;display:block;background:#fff}
+  .pf-mini{width:28px;height:34px}
+  .pf-trocar{flex:none;width:30px;height:30px;border-radius:50%;border:1px solid rgba(255,255,255,.2);background:rgba(255,255,255,.08);color:#f2f2f7;cursor:pointer;font-size:14px;padding:0}
+  .pf-trocar:disabled{opacity:.3;cursor:default}
+  .pf-opcoes{margin:4px 0 2px 34px;border-radius:14px;background:rgba(0,0,0,.25);border:1px solid rgba(255,255,255,.12);padding:4px}
+  .pf-opcao{display:flex;gap:9px;align-items:center;padding:6px 8px;border-radius:10px;cursor:pointer}
+  .pf-opcao:hover{background:rgba(255,255,255,.08)}
+  .pf-tl{position:relative;height:16px;border-radius:6px;background:rgba(255,255,255,.08);box-shadow:inset 0 1px 2px rgba(0,0,0,.3)}
+  .pf-tl-seg{position:absolute;top:2px;bottom:2px;border-radius:4px;background:linear-gradient(180deg,#5ac8fa,#0a84ff);box-shadow:inset 0 1px 0 rgba(255,255,255,.5)}
+  .pf-tl-escala{display:flex;justify-content:space-between;font-size:10.5px;color:rgba(235,235,245,.5);margin:3px 1px 0}
+  .pf-tl-aviso{font-size:11.5px;color:#ffd60a;margin:5px 2px 0}
+  .pf-tl-aviso.ok{color:#32d74b}
+  #pf-acoes button.pf:nth-child(2){margin-right:6px}
   #pf-log{max-height:160px;overflow:auto;font:11px ui-monospace,monospace;color:rgba(235,235,245,.7);white-space:pre-wrap}
   #pf-painel details summary{cursor:pointer;color:rgba(235,235,245,.8)}
   `;
@@ -2015,13 +2088,15 @@
       ...Object.entries(d.wiki || {}).map(([k, v]) => cinza('Wikipédia (' + k + '): ' + v.slice(0, 140) + '…'))].filter(Boolean));
   }
 
-  const ROTULO_ORIGEM = { 'convidado-produto': 'do convidado', fala: 'assunto falado no corte', citado: 'citado no corte', tema: 'assunto do corte', titulo: 'palavra do corte (título/fala)', convidado: 'convidado', 'tema-ep': 'assunto do episódio', coringa: 'coringa' };
+  const ROTULO_ORIGEM = { aprovado: 'aprovado antes', 'convidado-produto': 'do convidado', fala: 'assunto falado no corte', citado: 'citado no corte', tema: 'assunto do corte', titulo: 'palavra do corte (título/fala)', convidado: 'convidado', 'tema-ep': 'assunto do episódio', coringa: 'coringa' };
 
-  function mostrarSugestoes(candidatos, faltam, jaTem) {
+  function mostrarSugestoes(candidatos, faltam, jaTem, escolhidosAntes) {
     const box = limpar(document.getElementById('pf-conf'));
     box.style.display = 'block';
+    ultimosCandidatos = candidatos;
     const caixas = candidatos.map((p, i) => {
-      const c = el('input', { type: 'checkbox' }); c.checked = i < faltam;
+      const c = el('input', { type: 'checkbox' });
+      c.checked = escolhidosAntes ? escolhidosAntes.has(p.nome) : i < faltam;
       return { p, c };
     });
     const marcar = btn('', () => {
@@ -2029,27 +2104,97 @@
       if (!lista.length) { status('Escolha pelo menos um produto.'); return; }
       rodar(() => etapaMarcar(lista, jaTem));
     });
+    // linha do tempo: onde cada escolhido vai cair
+    const barra = el('div', { class: 'pf-tl' });
+    const escala = el('div', { class: 'pf-tl-escala' });
+    const aviso = el('div', { class: 'pf-tl-aviso' });
+    const desenharLinha = () => {
+      limpar(barra); limpar(escala);
+      if (!Number.isFinite(previa.duracao)) { const d = todos('video').map(v => v.duration).filter(n => Number.isFinite(n) && n > 0); if (d.length) previa.duracao = Math.max(...d); }
+      const dur = previa.duracao;
+      const sel = caixas.filter(x => x.c.checked).map(x => x.p);
+      if (!Number.isFinite(dur) || dur < 60) { aviso.textContent = ''; barra.style.display = 'none'; escala.style.display = 'none'; return; }
+      barra.style.display = ''; escala.style.display = '';
+      let plano = [];
+      try { if (sel.length) plano = planoPorFala(dur, sel.map(p => (Number.isFinite(p.tempo) ? p.tempo : null))); } catch { plano = []; }
+      for (const t of plano) {
+        const seg = el('div', { class: 'pf-tl-seg', title: mmss(t.inicio) + '–' + mmss(t.fim) + ' · ' + sel[t.linha].nome });
+        seg.style.left = (t.inicio / dur * 100) + '%'; seg.style.width = Math.max(0.6, (t.fim - t.inicio) / dur * 100 - 0.4) + '%';
+        barra.append(seg);
+      }
+      for (const f of [0, 0.25, 0.5, 0.75, 1]) escala.append(el('span', {}, mmss(Math.round(dur * f))));
+      const precisa = produtosParaCobrir(dur), tem = sel.length + jaTem;
+      aviso.textContent = tem >= precisa ? '✓ O vídeo todo fica coberto.' : 'Faltam ' + (precisa - tem) + ' produto(s) para cobrir o vídeo todo sem buraco.';
+      aviso.classList.toggle('ok', tem >= precisa);
+    };
     const atualizar = () => {
       const n = caixas.filter(x => x.c.checked).length;
       marcar.textContent = n ? '✓ Marcar ' + n + ' produto' + (n > 1 ? 's' : '') : 'Escolha um produto';
       caixas.forEach(x => x.card.classList.toggle('on', x.c.checked));
+      desenharLinha();
     };
-    for (const x of caixas) {
+    const lista = el('div', { class: 'pf-cards' });
+    const montarCard = x => {
       const { p, c } = x;
-      const sub = (p.rotulo === 'livro citado na fala' ? 'livro citado na fala' : ROTULO_ORIGEM[p.origem]) + (Number.isFinite(p.tempo) ? ' · falado em ' + mmss(p.tempo) : '') + (p.recente ? ' · já usado num corte recente' : '');
-      x.card = el('label', { class: 'pf-card', title: 'busca: ' + p.busca }, c, el('div', { class: 'pf-ck' }, '✓'), el('div', {}, el('div', { class: 'pf-nome' }, p.nome), el('div', { class: 'pf-sub' }, sub)));
+      const sub = (p.rotulo === 'livro citado na fala' ? 'livro citado na fala' : ROTULO_ORIGEM[p.origem] || '') + (Number.isFinite(p.tempo) ? ' · falado em ' + mmss(p.tempo) : '') + (p.loja ? ' · ' + p.loja : '') + (p.recente ? ' · já usado num corte recente' : '');
+      const foto = el('div', { class: 'pf-foto' });
+      if (p.img) { const im = el('img', { src: p.img, alt: '', loading: 'lazy', referrerpolicy: 'no-referrer' }); im.onerror = () => im.remove(); foto.append(im); }
+      const alternativas = (previa.alternativas.get(p.busca) || []).filter(a => a.nome !== p.nome && !caixas.some(y => y.p.nome === a.nome));
+      const trocar = el('button', { class: 'pf-trocar', title: alternativas.length ? 'Ver outras opções desta busca' : 'Sem outras opções nesta busca' }, '⇄');
+      if (!alternativas.length) trocar.disabled = true;
+      const opcoes = el('div', { class: 'pf-opcoes', style: 'display:none' });
+      trocar.onclick = e => {
+        e.preventDefault(); e.stopPropagation();
+        if (opcoes.style.display === 'none') {
+          limpar(opcoes);
+          for (const a of alternativas.slice(0, 6)) {
+            const op = el('div', { class: 'pf-opcao' });
+            const mini = el('div', { class: 'pf-foto pf-mini' }); if (a.img) { const im = el('img', { src: a.img, alt: '', referrerpolicy: 'no-referrer' }); im.onerror = () => im.remove(); mini.append(im); }
+            op.append(mini, el('div', {}, el('div', { class: 'pf-nome' }, a.nome), el('div', { class: 'pf-sub' }, a.loja || 'mesma busca')));
+            op.onclick = ev => { ev.preventDefault(); ev.stopPropagation(); const velho = x.wrap; x.p = { ...a, tempo: Number.isFinite(p.tempo) ? p.tempo : a.tempo }; x.c.checked = true; velho.replaceWith(montarCard(x)); atualizar(); status('Trocado por: ' + a.nome); };
+            opcoes.append(op);
+          }
+          opcoes.style.display = 'block';
+        } else opcoes.style.display = 'none';
+      };
+      x.card = el('label', { class: 'pf-card', title: 'busca: ' + p.busca }, c, el('div', { class: 'pf-ck' }, '✓'), foto, el('div', { style: 'flex:1;min-width:0' }, el('div', { class: 'pf-nome' }, p.nome), el('div', { class: 'pf-sub' }, sub)), trocar);
       c.onchange = atualizar;
-    }
-    const todos = el('a', {}, 'Todos'), nenhum = el('a', {}, 'Nenhum');
-    todos.onclick = () => { caixas.forEach(x => { x.c.checked = true; }); atualizar(); };
-    nenhum.onclick = () => { caixas.forEach(x => { x.c.checked = false; }); atualizar(); };
+      x.wrap = el('div', {}, x.card, opcoes);
+      return x.wrap;
+    };
+    for (const x of caixas) lista.append(montarCard(x));
+    const todosL = el('a', {}, 'Todos'), nenhumL = el('a', {}, 'Nenhum');
+    todosL.onclick = () => { caixas.forEach(x => { x.c.checked = true; }); atualizar(); };
+    nenhumL.onclick = () => { caixas.forEach(x => { x.c.checked = false; }); atualizar(); };
+    // Mais sugestões: primeiro o que já foi achado e não apareceu; depois as buscas que tinham sido puladas
+    const mais = btn('＋ Mais sugestões', () => {
+      const escolhidos = new Set(caixas.filter(x => x.c.checked).map(x => x.p.nome));
+      const jaMostrados = new Set(caixas.map(x => x.p.nome));
+      const extras = escolher(previa.achados, faltam + caixas.length + 6, previa.recentes).filter(p => !jaMostrados.has(p.nome) && !caixas.some(x => repetido(x.p.nome, p.nome))).slice(0, 5);
+      if (extras.length) {
+        for (const e of extras) if (!Number.isFinite(e.tempo)) e.tempo = momentoNaFala(previa.segs, e.chaves);
+        mostrarSugestoes([...caixas.map(x => x.p), ...extras], faltam, jaTem, escolhidos);
+        status('+' + extras.length + ' sugestão(ões) no fim da lista.');
+        return;
+      }
+      if (!previa.pulados.length) { status('Não tenho mais sugestões. Digite um assunto no campo "Assunto do corte" e clique em Começar de novo.'); return; }
+      rodar(async () => {
+        const painel = await abrirSeletor();
+        for (const q of previa.pulados.splice(0, 5)) { const r = await buscarComCache(painel, q); previa.achados.push(...r.aceitos); }
+        const novos = escolher(previa.achados, faltam + caixas.length + 6, previa.recentes).filter(p => !jaMostrados.has(p.nome) && !caixas.some(x => repetido(x.p.nome, p.nome))).slice(0, 5);
+        for (const e of novos) if (!Number.isFinite(e.tempo)) e.tempo = momentoNaFala(previa.segs, e.chaves);
+        mostrarSugestoes([...caixas.map(x => x.p), ...novos], faltam, jaTem, escolhidos);
+        status(novos.length ? '+' + novos.length + ' sugestão(ões) no fim da lista.' : 'As outras buscas não trouxeram nada novo.');
+      });
+    }, 'sec');
     box.append(...[
-      el('div', { class: 'pf-cab' }, el('b', {}, 'Sugestões'), el('span', {}, todos, ' · ', nenhum)),
+      el('div', { class: 'pf-cab' }, el('b', {}, 'Sugestões'), el('span', {}, todosL, ' · ', nenhumL)),
       candidatos.length ? null : el('div', { class: 'pf-alerta' }, 'Não achei nenhum produto que combine. Use os itens coringa (⚙ Ajustes) ou marque à mão.'),
-      el('div', { class: 'pf-sub', style: 'margin:0 2px 8px' }, 'Nada foi marcado ainda. Toque nos cartões para escolher.'),
-      el('div', { class: 'pf-cards' }, ...caixas.map(x => x.card))].filter(Boolean));
+      el('div', { class: 'pf-sub', style: 'margin:0 2px 8px' }, 'Nada foi marcado ainda. Toque nos cartões para escolher; ⇄ mostra outras opções.'),
+      lista,
+      el('div', { class: 'pf-rotulo' }, 'Onde cada produto vai aparecer'), barra, escala, aviso].filter(Boolean));
     atualizar();
-    acoes(marcar, btn('Cancelar', () => { etapa = 'inicio'; acoesInicio(); status('Cancelado. Nada foi marcado.'); }, 'sec'), btnAvisar());
+    acoes(marcar, mais, btn('Cancelar', () => { etapa = 'inicio'; acoesInicio(); status('Cancelado. Nada foi marcado.'); }, 'sec'), btnAvisar());
   }
 
   // Botão de avisar: abre um relatório no GitHub do script (o Claude lê de lá) e copia o relatório completo.
