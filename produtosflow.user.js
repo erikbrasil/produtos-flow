@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Produtos Flow — marcar produtos no YouTube Studio
 // @namespace    produtos-flow.cortes
-// @version      1.16.3
+// @version      1.16.4
 // @description  Escolhe produtos ligados ao convidado e ao assunto do corte, marca no Studio, distribui os tempos e PARA para conferência humana. Não salva nada sozinho. Sem IA.
 // @match        https://studio.youtube.com/*
 // @grant        GM_xmlhttpRequest
@@ -33,7 +33,7 @@
 
 (function () {
   'use strict';
-  const VERSAO = '1.16.3';
+  const VERSAO = '1.16.4';
 
   // ====================================================================================
   //  LISTAS — para acrescentar convidado ou tema, copie um bloco e troque os textos.
@@ -266,7 +266,7 @@
     },
     'nutricao': {
       nome: 'Nutrição / Saúde',
-      chaves: ['nutric*', 'nutricionist*', 'gordura*', 'carboidrat*', 'insulina', 'jejum', 'acucar', 'low carb', 'cetogenic*', 'keto', 'emagrec*', 'obesidade', 'obeso*', 'glicose', 'diabet*', 'colesterol', 'trigo', 'gluten', 'proteina*', 'caloria*', 'alimentac*', 'ultraprocessad*', 'vitamina*', 'medico*', 'saude'],
+      chaves: ['nutric*', 'nutricionist*', 'gordura*', 'carboidrat*', 'insulina', 'jejum', 'acucar', 'low carb', 'cetogenic*', 'keto', 'emagrec*', 'obesidade', 'obeso*', 'glicose', 'diabet*', 'colesterol', 'trigo', 'gluten', 'proteina*', 'caloria*', 'alimentac*', 'ultraprocessad*', 'vitamina*', 'medico*', 'saude', 'cortisol', 'hormoni*', 'exame*', 'ozempic', 'mounjaro', 'caneta*', 'canetinha*', 'semaglutida', 'tirzepatida'],
       buscas: [
         ['Livro nutrição', [['livro'], ['nutric*', 'alimenta*', 'dieta*']]],
         ['Livro low carb', [['livro'], ['low carb', 'cetogenic*', 'carboidrat*']]],
@@ -349,6 +349,10 @@
     { chaves: ['inteligencia artificial', 'chatgpt', 'robo*', 'automacao'], buscas: [['Livro inteligência artificial', [['livro'], ['inteligencia artificial', 'ia']]]] },
     { chaves: ['games', 'videogame*', 'playstation', 'xbox', 'nintendo', 'jogar'], buscas: [['Controle PS5 DualSense', [['dualsense', 'controle']]], ['Headset gamer', [['headset']]]] },
     { chaves: ['nutric*', 'nutricionist*', 'gordura*', 'carboidrat*', 'insulina', 'jejum', 'acucar', 'low carb', 'cetogenic*', 'keto', 'emagrec*', 'obesidade', 'glicose', 'diabet*', 'colesterol', 'trigo', 'gluten'], buscas: [['Livro nutrição', [['livro'], ['nutric*', 'alimenta*', 'dieta*']]], ['Livro low carb', [['livro'], ['low carb', 'cetogenic*', 'carboidrat*']]], ['Livro jejum intermitente', [['livro'], ['jejum']]], ['Barriga de Trigo William Davis', [['barriga de trigo']]]] },
+    { chaves: ['cortisol', 'hormoni*', 'testosteron*', 'estrogeni*', 'tireoide', 'endocrin*', 'menopausa', 'reposicao hormonal'], buscas: [['Livro hormônios', [['livro'], ['hormoni*', 'endocrin*', 'cortisol', 'tireoide']]], ['Livro saúde hormonal', [['livro'], ['hormon*', 'saude']]]] },
+    { chaves: ['exame* de sangue', 'exames', 'check-up', 'checkup', 'hemograma', 'laboratori*'], buscas: [['Livro exames laboratoriais', [['livro', 'manual', 'guia'], ['exame*', 'laboratori*']]], ['Medidor de pressão digital', [['medidor', 'aparelho', 'monitor'], ['pressao']]]] },
+    { chaves: ['caneta*', 'canetinha*', 'ozempic', 'mounjaro', 'semaglutida', 'tirzepatida', 'wegovy', 'emagrec*', 'obesidade'], buscas: [['Livro emagrecimento', [['livro'], ['emagrec*', 'obesidade', 'peso']]], ['Balança de bioimpedância', [['balanca'], ['bioimpedancia', 'corporal']]]] },
+    { chaves: ['vitamina*', 'suplement*', 'magnesio', 'omega 3', 'zinco'], buscas: [['Vitamina D3', [['vitamina d']]], ['Magnésio suplemento', [['magnesio']]], ['Ômega 3', [['omega']]]] },
     { chaves: ['academia', 'treino*', 'musculacao', 'dieta*', 'whey', 'creatina'], buscas: [['Creatina', [['creatina']]], ['Whey protein', [['whey']]]] },
     { chaves: ['guerra mundial', 'nazis*', 'hitler', 'segunda guerra'], buscas: [['Livro Segunda Guerra Mundial', [['livro'], ['segunda guerra', 'guerra mundial']]]] },
     { chaves: ['crime*', 'faccao', 'faccoes', 'pcc', 'comando vermelho', 'trafic*', 'seguranca publica'], buscas: [['Livro crime organizado', [['livro'], ['crime', 'faccao', 'pcc', 'trafico']]]] },
@@ -377,7 +381,7 @@
         if (forte(ws[j])) { partes = [...partes, ws[j]]; j += 1; }
         else if (liga(ws[j]) && forte(ws[j + 1])) { partes = [...partes, ws[j], ws[j + 1]]; j += 2; }
         else break;
-        soma(partes.join(' '));
+        if (new Set(partes.filter(w => !liga(w))).size === partes.filter(w => !liga(w)).length) soma(partes.join(' '));
       }
     }
     let lista = [...cont].filter(([, n]) => n >= 2).map(([k, n]) => ({ frase: k, n }));
@@ -500,14 +504,21 @@
     // o assunto do CORTE manda; o episódio inteiro só ajuda quando o corte não diz nada
     const fontes = [[titulo, 4], [tituloEpisodio, 1], [(tags || []).join(' , '), 1]];
     const convidados = [];
+    // nomes do episódio sem "Dr.", "Prof." etc. ("DR. RENAN BOTELHO" → "Renan Botelho")
+    const semTitulo = n => String(n || '').replace(/^\s*(dr|dra|doutor|doutora|prof|profa|professor|professora|general|coronel|pastor|padre)\.?\s+/i, '').trim();
+    const nomesEp = nomesDoEpisodio(tituloEpisodio).nomes.map(n => norm(semTitulo(n)));
     for (const c of todos) {
+      // apelido de UMA palavra ("renan") não vale se o episódio é de outra pessoa com esse nome ("Renan Botelho")
+      const outroComMesmoNome = w => nomesEp.some(ne => ne.split(' ').includes(w) && !c.apelidos.some(a => a.includes(' ') && tem(ne, a)) && ne.split(' ').length > 1);
+      const apelidosOk = c.apelidos.filter(a => a.includes(' ') || !outroComMesmoNome(a));
+      if (!apelidosOk.length) continue;
       let pontos = 0;
-      for (const [txt, peso] of fontesNomes) if (txt && temAlgum(txt, c.apelidos)) pontos += peso;
+      for (const [txt, peso] of fontesNomes) if (txt && temAlgum(txt, apelidosOk)) pontos += peso;
       if (pontos > 0 && !convidados.some(x => x.nome === c.nome)) convidados.push({ ...c, pontos });
     }
     // QUALQUER convidado: nomes tirados do título do episódio, mesmo que não estejam na lista
     const ep = nomesDoEpisodio(tituloEpisodio);
-    for (const nomeEp of ep.nomes) {
+    for (const nomeEp of ep.nomes.map(semTitulo)) {
       if (convidados.some(c => temAlgum(nomeEp, c.apelidos) || tem(c.nome, norm(nomeEp)))) continue;
       const n = norm(nomeEp);
       const apelido = ep.apelidos[n];
@@ -629,7 +640,8 @@
   }
 
   // Assuntos centrais da FALA: as palavras com conteúdo mais repetidas na legenda (sem IA, só contagem).
-  const FALA_VAZIAS = new Set(('visao diferente diferentes normal normais verdade questao situacao problema problemas lugar parte partes ' +
+  const FALA_VAZIAS = new Set(('pergunta perguntas resposta respostas quilo quilos kilo kilos erro erros errado errada certinho exatamente ' +
+    'visao diferente diferentes normal normais verdade questao situacao problema problemas lugar parte partes ' +
     'conversa conversar conversando ideia ideias exemplo certo certa errado claro outra outro outras outros mesma mesmo mesmos ' +
     'grande grandes pequeno maior menor melhor pior primeiro primeira ultimo ultima todos todas cada qualquer tanto tanta ' +
     'entao tipo assim cara mano velho ne nao sim tipo aham uhum olha olhar ouvir escuta entendeu entende ' +
