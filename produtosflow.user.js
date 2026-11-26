@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Produtos Flow — marcar produtos no YouTube Studio
 // @namespace    produtos-flow.cortes
-// @version      1.16.4
+// @version      1.17.0
 // @description  Escolhe produtos ligados ao convidado e ao assunto do corte, marca no Studio, distribui os tempos e PARA para conferência humana. Não salva nada sozinho. Sem IA.
 // @match        https://studio.youtube.com/*
 // @grant        GM_xmlhttpRequest
@@ -33,7 +33,7 @@
 
 (function () {
   'use strict';
-  const VERSAO = '1.16.4';
+  const VERSAO = '1.17.0';
 
   // ====================================================================================
   //  LISTAS — para acrescentar convidado ou tema, copie um bloco e troque os textos.
@@ -1703,7 +1703,8 @@
     if (!r) { registrar('Pasta "' + h.name + '": não achei transcrição com o nome do vídeo' + (base ? ' ("' + base + '")' : '') + '.'); if (avisar) status('Não achei na pasta "' + h.name + '" uma transcrição com o nome do vídeo' + (base ? ': ' + base : '') + '.'); return false; }
     const dados = lerArquivoTranscricao(r.texto);
     if (!dados) { registrar('O arquivo "' + r.nome + '" não parece transcrição.'); return false; }
-    transcricaoArquivo = { id: idDoVideo() || location.pathname, nome: r.nome, dados };
+    transcricaoArquivo = { id: idDoVideo() || location.pathname, nome: r.nome, dados, daPasta: true };
+    try { atualizarFonte(); } catch {}
     registrar('Transcrição achada na pasta "' + h.name + '": ' + r.nome);
     if (avisar) status('Achei: ' + r.nome + ' (' + dados.segs.length + ' trechos). Pode clicar em Começar.');
     try { const rot = document.getElementById('pf-rot-arquivo'); if (rot) rot.textContent = '✔ ' + r.nome; } catch {}
@@ -1731,29 +1732,84 @@
   //  PAINEL (botão flutuante)
   // ====================================================================================
   const CSS = `
-  #pf-botao{position:fixed;right:18px;bottom:18px;z-index:2147483646;background:#ff4e45;color:#fff;border:0;border-radius:24px;padding:10px 16px;font:600 14px Roboto,Arial,sans-serif;box-shadow:0 4px 14px rgba(0,0,0,.35);cursor:pointer}
-  #pf-botao:hover{filter:brightness(1.1)}
-  #pf-painel{position:fixed;right:18px;bottom:70px;z-index:2147483647;width:380px;max-height:78vh;overflow:auto;background:#1f1f1f;color:#eee;border:1px solid #3a3a3a;border-radius:12px;font:13px/1.45 Roboto,Arial,sans-serif;box-shadow:0 10px 30px rgba(0,0,0,.5);display:none}
+  #pf-botao,#pf-painel{--vid:linear-gradient(145deg,rgba(255,255,255,.16),rgba(255,255,255,.05) 45%,rgba(255,255,255,.09));font-family:-apple-system,"SF Pro Text","SF Pro Display",system-ui,"Segoe UI",Roboto,sans-serif}
+  #pf-botao{position:fixed;right:18px;bottom:18px;z-index:2147483646;width:72px;height:72px;border-radius:50%;display:grid;place-items:center;cursor:pointer;padding:0;
+    background:linear-gradient(160deg,rgba(255,106,95,.9),rgba(229,51,42,.84));-webkit-backdrop-filter:blur(16px) saturate(180%);backdrop-filter:blur(16px) saturate(180%);
+    border:1px solid rgba(255,255,255,.45);box-shadow:inset 0 1px 0 rgba(255,255,255,.7),inset 0 -3px 8px rgba(0,0,0,.18),0 10px 26px rgba(229,51,42,.45)}
+  #pf-botao:hover{filter:brightness(1.07)}
+  #pf-botao:active{transform:scale(.96)}
+  .pf-carro{width:86%;height:86%;display:block;color:#fff;overflow:visible}
+  .pf-carro .pf-cai{transform-box:view-box;transform-origin:36px 28px}
+  .pensando .pf-carro .pf-cai{animation:pf-cair 1.5s cubic-bezier(.35,.1,.45,1) infinite}
+  .pensando .pf-carro{animation:pf-balanca 1.5s ease-in-out infinite;transform-origin:50% 90%}
+  @keyframes pf-cair{0%{transform:translate(6px,-40px) rotate(-55deg);opacity:0}12%{opacity:1}50%{transform:translate(0,3px) rotate(4deg)}60%{transform:translate(0,-4px) rotate(-2deg)}70%,100%{transform:translate(0,0) rotate(0);opacity:1}}
+  @keyframes pf-balanca{0%,48%,100%{transform:rotate(0)}54%{transform:rotate(-5deg) scale(.97,1.03)}62%{transform:rotate(3deg)}70%{transform:rotate(0)}}
+  @media (prefers-reduced-motion:reduce){.pensando .pf-carro,.pensando .pf-carro .pf-cai{animation:none}}
+  #pf-painel{position:fixed;right:18px;bottom:102px;z-index:2147483647;width:384px;max-height:calc(100vh - 130px);overflow:auto;border-radius:30px;padding:16px;display:none;color:#f2f2f7;font-size:13px;line-height:1.45;
+    background:var(--vid),rgba(28,30,36,.62);-webkit-backdrop-filter:blur(28px) saturate(185%) brightness(1.05);backdrop-filter:blur(28px) saturate(185%) brightness(1.05);
+    border:1px solid rgba(255,255,255,.28);box-shadow:inset 0 1px 0 rgba(255,255,255,.55),inset 0 -1px 0 rgba(255,255,255,.12),inset 0 0 22px rgba(255,255,255,.06),0 24px 60px rgba(0,0,0,.45),0 4px 14px rgba(0,0,0,.25);scrollbar-width:thin}
   #pf-painel.aberto{display:block}
-  #pf-painel header{display:flex;justify-content:space-between;align-items:center;padding:12px 14px;border-bottom:1px solid #333;font-weight:700;font-size:14px}
-  #pf-painel header small{color:#999;font-weight:400}
-  #pf-painel section{padding:10px 14px;border-bottom:1px solid #2c2c2c}
-  #pf-painel h4{margin:0 0 6px;font-size:12px;color:#aaa;text-transform:uppercase;letter-spacing:.04em}
-  #pf-painel button.pf{background:#3ea6ff;color:#0f0f0f;border:0;border-radius:18px;padding:7px 14px;font-weight:600;cursor:pointer;margin:4px 6px 0 0}
-  #pf-painel button.pf.sec{background:#333;color:#eee}
-  #pf-painel button.pf.perigo{background:#ff6b6b}
+  #pf-painel *{box-sizing:border-box}
+  #pf-painel header{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px}
+  .pf-marca{display:flex;align-items:center;gap:10px;font-weight:600;font-size:16px;letter-spacing:-.01em}
+  .pf-marca small{font-weight:400;font-size:11px;color:rgba(235,235,245,.55)}
+  .pf-icone{width:48px;height:48px;border-radius:14px;display:grid;place-items:center;flex:none;background:linear-gradient(160deg,#ff6a5f,#e5332a);box-shadow:inset 0 1px 0 rgba(255,255,255,.55),0 4px 10px rgba(255,59,48,.35)}
+  .pf-pensa{display:none;font-size:12px;font-weight:400;color:rgba(235,235,245,.75)}
+  #pf-painel.pensando .pf-pensa{display:block}
+  .pf-bolinhas{display:flex;gap:6px}
+  .pf-bolinha{width:32px;height:32px;border-radius:50%;display:grid;place-items:center;color:#eee;font-size:14px;cursor:pointer;padding:0;background:rgba(255,255,255,.10);border:1px solid rgba(255,255,255,.18);box-shadow:inset 0 1px 0 rgba(255,255,255,.35)}
+  #pf-painel section{padding:0;margin:0 0 12px;border:0}
+  #pf-painel h4{margin:0 0 8px;font-size:12px;font-weight:500;color:rgba(235,235,245,.6)}
+  .pf-rotulo{font-size:12px;color:rgba(235,235,245,.6);margin:10px 2px 7px}
+  .pf-fontes{display:flex;gap:4px;padding:4px;border-radius:18px;background:rgba(118,118,128,.24);box-shadow:inset 0 1px 2px rgba(0,0,0,.25)}
+  .pf-fonte{flex:1;text-align:center;padding:8px 4px 7px;border-radius:14px;cursor:pointer;color:rgba(235,235,245,.75);font-size:12px;transition:background .25s,color .25s,box-shadow .25s;user-select:none}
+  .pf-fonte b{display:block;font-size:18px;font-weight:400;line-height:1.2}
+  .pf-fonte small{display:block;font-size:10px;color:rgba(235,235,245,.5)}
+  .pf-fonte.ativa{color:#fff;background:linear-gradient(160deg,rgba(255,255,255,.30),rgba(255,255,255,.12));box-shadow:inset 0 1px 0 rgba(255,255,255,.6),0 2px 8px rgba(0,0,0,.25)}
+  .pf-fonte.ativa small{color:rgba(255,255,255,.75)}
+  #pf-usando{font-size:11.5px;margin:7px 2px 0;color:rgba(235,235,245,.65)}
+  #pf-usando.ok{color:#32d74b}
+  .pf-links{font-size:11.5px;margin:4px 2px 0;color:rgba(235,235,245,.55)}
+  .pf-links a{color:#64b5ff;cursor:pointer;text-decoration:none}
+  #pf-status{min-height:18px;margin:2px 2px 0;color:#ffd60a}
+  #pf-painel button.pf{border:0;border-radius:99px;padding:9px 16px;font:600 13px -apple-system,system-ui,"Segoe UI",sans-serif;cursor:pointer;margin:6px 6px 0 0;color:#fff;
+    background:linear-gradient(180deg,#3d9bff,#0a6cff);box-shadow:inset 0 1px 0 rgba(255,255,255,.55),inset 0 -2px 6px rgba(0,0,0,.18),0 6px 16px rgba(10,132,255,.3)}
+  #pf-acoes button.pf:first-child{display:block;width:100%;margin-right:0;padding:11px 0;font-size:14px}
+  #pf-painel button.pf.sec{background:rgba(255,255,255,.10);color:#f2f2f7;border:1px solid rgba(255,255,255,.18);box-shadow:inset 0 1px 0 rgba(255,255,255,.3)}
+  #pf-acoes button.pf.sec:first-child{display:inline-block;width:auto;padding:9px 16px;font-size:13px}
+  #pf-painel button.pf.perigo{background:linear-gradient(180deg,#ff6961,#e5332a);box-shadow:inset 0 1px 0 rgba(255,255,255,.5),0 6px 16px rgba(229,51,42,.3)}
   #pf-painel button.pf:disabled{opacity:.5;cursor:default}
-  #pf-status{color:#ffd166;min-height:18px}
+  #pf-painel button.pf:active{transform:scale(.985)}
   #pf-lista{margin:6px 0 0;padding-left:18px}
   #pf-lista li{margin:2px 0}
-  .pf-tag{display:inline-block;background:#2d2d2d;border-radius:10px;padding:1px 8px;margin:2px 4px 2px 0}
-  .pf-alerta{background:#3a2a10;border:1px solid #7a5a20;border-radius:8px;padding:8px;margin-top:6px}
-  .pf-ok{background:#11301c;border:1px solid #1f6b3a;border-radius:8px;padding:8px;margin-top:6px}
+  .pf-tag{display:inline-block;font-size:11.5px;padding:3px 10px;border-radius:99px;background:rgba(255,255,255,.12);box-shadow:inset 0 1px 0 rgba(255,255,255,.2);margin:2px 4px 2px 0}
+  #pf-det{border-radius:16px;padding:10px 12px !important;background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.12) !important}
+  #pf-det b{font-weight:500;color:rgba(235,235,245,.7)}
+  .pf-alerta{background:rgba(255,159,10,.14);border:1px solid rgba(255,159,10,.45);border-radius:14px;padding:9px 11px;margin-top:6px}
+  .pf-ok{background:rgba(48,209,88,.14);border:1px solid rgba(48,209,88,.45);border-radius:14px;padding:9px 11px;margin-top:6px}
   #pf-painel label{display:inline-flex;align-items:center;gap:6px;margin-right:12px}
-  #pf-painel input[type=number]{width:52px;background:#111;color:#eee;border:1px solid #444;border-radius:6px;padding:3px}
-  #pf-painel textarea{width:100%;height:70px;background:#111;color:#eee;border:1px solid #444;border-radius:6px;font:12px monospace}
-  #pf-log{max-height:150px;overflow:auto;font:11px monospace;color:#bbb;white-space:pre-wrap}
+  #pf-painel input[type=number],#pf-painel input[type=text],#pf-painel textarea{background:rgba(0,0,0,.28);color:#f2f2f7;border:1px solid rgba(255,255,255,.16);border-radius:10px;padding:5px 8px}
+  #pf-painel input[type=number]{width:56px}
+  #pf-painel textarea{width:100%;height:70px;font:12px ui-monospace,monospace}
+  .pf-cab{display:flex;justify-content:space-between;align-items:baseline;margin:0 2px 8px}
+  .pf-cab b{font-weight:600;font-size:14px}
+  .pf-cab a{color:#64b5ff;cursor:pointer;font-size:12.5px}
+  .pf-cards{display:flex;flex-direction:column;gap:7px;max-height:300px;overflow:auto;padding:1px}
+  .pf-card{display:flex;gap:11px;align-items:center;padding:9px 11px;border-radius:18px;cursor:pointer;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.12);box-shadow:inset 0 1px 0 rgba(255,255,255,.15);transition:background .2s,border-color .2s,transform .12s;user-select:none}
+  .pf-card:active{transform:scale(.98)}
+  .pf-card.on{background:linear-gradient(160deg,rgba(10,132,255,.32),rgba(10,132,255,.14));border-color:rgba(100,181,255,.65);box-shadow:inset 0 1px 0 rgba(255,255,255,.3),0 4px 14px rgba(10,132,255,.18)}
+  .pf-card input{display:none}
+  .pf-ck{width:24px;height:24px;border-radius:50%;flex:none;display:grid;place-items:center;font-size:14px;color:transparent;border:1.6px solid rgba(255,255,255,.45);transition:all .2s}
+  .pf-card.on .pf-ck{background:#0a84ff;border-color:#0a84ff;color:#fff;box-shadow:inset 0 1px 0 rgba(255,255,255,.45)}
+  .pf-nome{font-size:13px;line-height:1.3}
+  .pf-sub{font-size:11.5px;color:rgba(235,235,245,.6)}
+  .pf-rodape{display:flex;justify-content:center;gap:16px;margin-top:4px;font-size:12px}
+  .pf-rodape button{background:none;border:0;color:rgba(235,235,245,.7);cursor:pointer;font:inherit;padding:4px}
+  .pf-rodape button:hover{color:#fff}
+  #pf-log{max-height:160px;overflow:auto;font:11px ui-monospace,monospace;color:rgba(235,235,245,.7);white-space:pre-wrap}
+  #pf-painel details summary{cursor:pointer;color:rgba(235,235,245,.8)}
   `;
+
 
   // O YouTube Studio bloqueia innerHTML ("Trusted Types"), então tudo é montado peça por peça.
   function el(tag, attrs = {}, ...filhos) {
@@ -1790,16 +1846,43 @@
   const limpar = box => { while (box.firstChild) box.removeChild(box.firstChild); return box; };
   const cinza = (...f) => el('div', { style: 'color:#999;margin-top:4px' }, ...f);
 
+  // Ícone: carrinho de supermercado com a logo do canal (arquivo enviado pela equipe) jogada dentro
+  const LOGO_FLOW = 'data:image/png;base64,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';
+  function iconeCarrinho() {
+    const NS = 'http://www.w3.org/2000/svg';
+    const n = (tag, at) => { const e = document.createElementNS(NS, tag); for (const k in at) e.setAttribute(k, at[k]); return e; };
+    const svg = n('svg', { viewBox: '0 0 64 64', class: 'pf-carro', 'aria-hidden': 'true' });
+    const traco = { fill: 'none', stroke: 'currentColor', 'stroke-width': '3.6', 'stroke-linecap': 'round', 'stroke-linejoin': 'round' };
+    svg.append(
+      n('path', { d: 'M2 7h8l2.5 5', ...traco }),
+      n('path', { d: 'M11 12h51l-6.5 32H18z', ...traco, fill: 'rgba(255,255,255,.10)' }),
+      n('path', { d: 'M18 44l-2 5h40', ...traco }),
+      n('circle', { cx: '22', cy: '56', r: '4.2', fill: 'currentColor' }),
+      n('circle', { cx: '50', cy: '56', r: '4.2', fill: 'currentColor' }));
+    const cai = n('g', { class: 'pf-cai' }), giro = n('g', { transform: 'rotate(-14 36 28)' });
+    giro.append(n('image', { href: LOGO_FLOW, x: '20', y: '18', width: '32', height: '20', preserveAspectRatio: 'xMidYMid meet' }));
+    cai.append(giro); svg.append(cai);
+    return svg;
+  }
+  // mostra de onde vem a transcrição (Pasta / Arquivo / Legenda do YouTube)
+  function atualizarFonte(msg) {
+    const tipo = transcricaoArquivo ? (transcricaoArquivo.daPasta ? 'pasta' : 'arquivo') : 'yt';
+    for (const t of ['pasta', 'arquivo', 'yt']) { const e = document.getElementById('pf-fonte-' + t); if (e) e.classList.toggle('ativa', t === tipo); }
+    const u = document.getElementById('pf-usando'); if (!u) return;
+    u.classList.toggle('ok', !!transcricaoArquivo);
+    u.textContent = msg || (transcricaoArquivo ? '✓ Usando: ' + transcricaoArquivo.nome + ' · ' + transcricaoArquivo.dados.segs.length + ' trechos' : 'Sem arquivo: vou ler a legenda automática do YouTube (página de Idiomas).');
+  }
   function montar() {
     if (document.getElementById('pf-botao')) return;
     const estilo = document.createElement('style'); estilo.textContent = CSS;
     (document.head || document.documentElement).append(estilo);
-    const botao = el('button', { id: 'pf-botao', title: 'Produtos Flow' }, '🛒 Produtos Flow');
+    const botao = el('button', { id: 'pf-botao', title: 'Produtos Flow', 'aria-label': 'Produtos Flow' }); botao.append(iconeCarrinho());
     botao.onclick = () => document.getElementById('pf-painel').classList.toggle('aberto');
-    const fechar = el('button', { class: 'pf sec', id: 'pf-fechar', style: 'margin:0' }, '✕');
+    const fechar = el('button', { class: 'pf-bolinha', id: 'pf-fechar', title: 'Fechar' }, '✕');
+    const engrenagem = el('button', { class: 'pf-bolinha', id: 'pf-engrenagem', title: 'Ajustes' }, '⚙');
     const alvo = el('input', { type: 'number', id: 'pf-alvo', min: '1', max: '30' }); alvo.value = cfg.alvo;
     const autoCx = el('input', { type: 'checkbox', id: 'pf-auto' }); autoCx.checked = cfg.auto;
-    const dica = el('input', { type: 'text', id: 'pf-dica', placeholder: 'palavras separadas por vírgula', style: 'width:100%;background:#111;color:#eee;border:1px solid #444;border-radius:6px;padding:4px;margin-top:3px' });
+    const dica = el('input', { type: 'text', id: 'pf-dica', placeholder: 'opcional: palavras do assunto, separadas por vírgula', style: 'width:100%;margin-top:4px' });
     campoDigitavel(dica, 'Assunto do corte (palavras separadas por vírgula):', v => { cfg.dica = v; });
     const numero = (input, nome, chave, padrao) => campoDigitavel(input, nome + ' (número):', v => { const n = Math.max(1, Math.min(30, Number(v) || padrao)); input.value = n; cfg[chave] = n; GM_setValue(chave, n); });
     const maximo = el('input', { type: 'number', id: 'pf-max', min: '1', max: '30' }); maximo.value = cfg.maximo;
@@ -1810,17 +1893,24 @@
     const coringas = el('textarea', { id: 'pf-coringas' }); coringas.value = cfg.coringas;
     campoDigitavel(coringas, 'Itens coringa (uma busca por item):', v => { cfg.coringas = v; GM_setValue('coringas', v); status('Itens coringa guardados (' + listaCoringas().length + ').'); }, true);
     const salvarCoringas = el('button', { class: 'pf sec' }, 'Guardar itens coringa');
-    const copiar = el('button', { class: 'pf sec', id: 'pf-copiar' }, '📋 Copiar relatório (para mandar ao Claude)');
+    const copiar = el('button', { id: 'pf-copiar', title: 'Copiar relatório para mandar ao Claude' }, '⧉ Relatório');
     // transcrição de arquivo
     const entradaArquivo = el('input', { type: 'file', accept: '.srt,.vtt,.txt,text/plain', style: 'display:none' });
-    const botaoArquivo = el('button', { class: 'pf sec', id: 'pf-arquivo' }, '📄 Usar transcrição de arquivo');
-    const rotuloArquivo = el('span', { style: 'color:#aaa;font-size:11px', id: 'pf-rot-arquivo' }, '');
-    const botaoPasta = el('button', { class: 'pf sec', id: 'pf-pasta' }, '📁 Pasta das transcrições');
-    const botaoProcurar = el('button', { class: 'pf sec', id: 'pf-procurar' }, '🔎 Procurar transcrição');
-    lerPasta().then(h => { if (h) botaoPasta.textContent = '📁 Pasta: ' + h.name; }).catch(() => {});
-    botaoPasta.onclick = () => { escolherPasta().then(h => { botaoPasta.textContent = '📁 Pasta: ' + h.name; status('Pasta guardada: ' + h.name + '. No Começar eu procuro a transcrição lá.'); }).catch(e => { if (e && e.name !== 'AbortError') status('Não consegui usar a pasta: ' + e.message); }); };
-    botaoProcurar.onclick = () => { lerPasta().then(h => (h ? permissaoPasta(h) : false)).finally(() => carregarDaPasta(true).catch(e => status('Erro ao procurar: ' + e.message))); };
-    const mostrarArquivo = () => { rotuloArquivo.textContent = transcricaoArquivo ? '✔ ' + transcricaoArquivo.nome + ' (' + transcricaoArquivo.dados.segs.length + ' trechos) — clique de novo para trocar' : ''; };
+    const tile = (id, icone, nome, sub) => el('div', { class: 'pf-fonte', id: 'pf-fonte-' + id, role: 'button', tabindex: '0' }, el('b', {}, icone), nome, el('small', { id: 'pf-sub-' + id }, sub));
+    const botaoPasta = tile('pasta', '🗀', 'Pasta', 'escolher');
+    const botaoArquivo = tile('arquivo', '🗎', 'Arquivo', 'escolher');
+    const botaoYt = tile('yt', '▶', 'Legenda YT', 'reserva');
+    const rotuloArquivo = el('span', { id: 'pf-rot-arquivo', style: 'display:none' }, '');
+    const trocarPasta = el('a', {}, 'trocar pasta');
+    const procurarDeNovo = el('a', {}, 'procurar de novo');
+    lerPasta().then(h => { if (h) document.getElementById('pf-sub-pasta').textContent = h.name; }).catch(() => {});
+    const usarPasta = h => { document.getElementById('pf-sub-pasta').textContent = h.name; status('Pasta guardada: ' + h.name + '. Procurando a transcrição do vídeo…'); carregarDaPasta(true).then(() => atualizarFonte()).catch(e => status('Erro ao procurar: ' + e.message)); };
+    const escolherEUsar = () => escolherPasta().then(usarPasta).catch(e => { if (e && e.name !== 'AbortError') status('Não consegui usar a pasta: ' + e.message); });
+    botaoPasta.onclick = () => { lerPasta().then(h => { if (!h) return escolherEUsar(); return permissaoPasta(h).finally(() => carregarDaPasta(true).then(() => atualizarFonte()).catch(e => status('Erro ao procurar: ' + e.message))); }); };
+    trocarPasta.onclick = escolherEUsar;
+    procurarDeNovo.onclick = () => botaoPasta.onclick();
+    botaoYt.onclick = () => { transcricaoArquivo = null; atualizarFonte(); status('Vou usar a legenda automática do YouTube.'); };
+    const mostrarArquivo = () => atualizarFonte();
     botaoArquivo.onclick = () => { entradaArquivo.value = ''; entradaArquivo.click(); };
     entradaArquivo.onchange = () => {
       const f = entradaArquivo.files && entradaArquivo.files[0];
@@ -1835,20 +1925,25 @@
       };
       leitor.readAsText(f, 'utf-8');
     };
+    const marca = el('div', { class: 'pf-marca' });
+    const icone = el('div', { class: 'pf-icone' }); icone.append(iconeCarrinho());
+    marca.append(icone, el('div', {}, el('div', {}, 'Produtos Flow ', el('small', {}, 'v' + VERSAO)), el('div', { class: 'pf-pensa' }, 'procurando produtos…')));
+    const verDetalhes = el('button', { id: 'pf-ver-detalhes' }, '☰ Detalhes');
+    const avisarRod = el('button', { id: 'pf-avisar-rod' }, '⚑ Avisar erro');
     const painel = el('div', { id: 'pf-painel' },
-      el('header', {}, el('span', {}, '🛒 Produtos Flow ', el('small', {}, 'v' + VERSAO)), fechar),
+      el('header', {}, marca, el('div', { class: 'pf-bolinhas' }, engrenagem, fechar)),
       el('section', {},
-        el('div', { id: 'pf-status' }, 'Abra o vídeo (detalhes) ou o rascunho e clique em Começar.'),
-        el('label', { style: 'display:block;margin-top:8px' }, 'Assunto do corte (opcional): ', dica),
-        el('div', { style: 'color:#888;font-size:11px' }, 'Ex.: vício, felicidade · STF · drift, Japão. Vem antes de tudo na busca.'),
-        el('div', { style: 'margin-top:8px' }, botaoPasta, ' ', botaoProcurar),
-        el('div', { style: 'margin-top:4px' }, botaoArquivo, ' ', rotuloArquivo, entradaArquivo),
-        el('div', { style: 'color:#888;font-size:11px' }, 'Escolha UMA VEZ a pasta onde ficam as transcrições (.srt/.txt com o mesmo nome do vídeo). No Começar eu procuro lá sozinho; se não achar, uso a legenda do YouTube.'),
-        el('div', { id: 'pf-acoes' })),
-      el('section', { id: 'pf-det', style: 'display:none' }),
+        el('div', { class: 'pf-rotulo' }, 'De onde vem a transcrição'),
+        el('div', { class: 'pf-fontes' }, botaoPasta, botaoArquivo, botaoYt),
+        el('div', { id: 'pf-usando' }, ''),
+        el('div', { class: 'pf-links' }, trocarPasta, ' · ', procurarDeNovo, rotuloArquivo, entradaArquivo),
+        el('div', { class: 'pf-rotulo' }, 'Assunto do corte'), dica,
+        el('div', { id: 'pf-status' }, 'Abra o vídeo (detalhes) ou o rascunho e clique em Começar.')),
       el('section', { id: 'pf-conf', style: 'display:none' }),
+      el('section', {}, el('div', { id: 'pf-acoes' })),
+      el('section', { id: 'pf-det', style: 'display:none' }),
       el('section', { id: 'pf-aviso', style: 'display:none' }),
-      el('section', {},
+      el('section', { id: 'pf-ajustes', style: 'display:none' },
         el('h4', {}, 'Ajustes'),
         el('label', {}, autoCx, ' Automático (cobrir o vídeo todo)'), el('br'),
         el('label', {}, 'Quantos (manual) ', alvo),
@@ -1856,13 +1951,18 @@
         el('label', {}, 'Mínimo ', minimo),
         el('details', { style: 'margin-top:8px' },
           el('summary', {}, 'Convidados extras (sem mexer no código)'),
-          el('div', { style: 'color:#aaa;margin:4px 0' }, 'Uma linha por convidado: ', el('code', {}, 'Nome = busca 1; busca 2'), el('br'), 'Ex.: ', el('code', {}, 'Edu Falaschi = Angra vinil; corda guitarra')),
+          el('div', { style: 'color:rgba(235,235,245,.6);margin:4px 0' }, 'Uma linha por convidado: ', el('code', {}, 'Nome = busca 1; busca 2'), el('br'), 'Ex.: ', el('code', {}, 'Edu Falaschi = Angra vinil; corda guitarra')),
           extras, salvarExtras),
         el('details', { style: 'margin-top:8px' },
           el('summary', {}, 'Itens coringa (quando não achar produto do assunto)'),
-          el('div', { style: 'color:#aaa;margin:4px 0' }, 'Uma busca por linha. Entram por último, só para completar a quantidade.'),
+          el('div', { style: 'color:rgba(235,235,245,.6);margin:4px 0' }, 'Uma busca por linha. Entram por último, só para completar a quantidade.'),
           coringas, salvarCoringas)),
-      el('section', {}, el('h4', {}, 'Registro'), el('div', { id: 'pf-log' }), copiar));
+      el('section', { id: 'pf-registro', style: 'display:none' }, el('h4', {}, 'Registro'), el('div', { id: 'pf-log' })),
+      el('div', { class: 'pf-rodape' }, avisarRod, copiar, verDetalhes));
+    engrenagem.onclick = () => { const a = document.getElementById('pf-ajustes'); a.style.display = a.style.display === 'none' ? 'block' : 'none'; };
+    verDetalhes.onclick = () => { const r = document.getElementById('pf-registro'); r.style.display = r.style.display === 'none' ? 'block' : 'none'; };
+    avisarRod.onclick = () => abrirAviso();
+    setTimeout(() => atualizarFonte(), 0);
     document.body.append(botao, painel);
     numero(alvo, 'Quantos produtos (manual)', 'alvo', 10);
     numero(minimo, 'Mínimo de produtos', 'minimo', 5);
@@ -1924,21 +2024,32 @@
       const c = el('input', { type: 'checkbox' }); c.checked = i < faltam;
       return { p, c };
     });
-    const contador = el('b', {}, '');
-    const atualizar = () => { contador.textContent = caixas.filter(x => x.c.checked).length + ' escolhido(s)'; };
-    caixas.forEach(x => x.c.onchange = atualizar); atualizar();
-    box.append(...[
-      el('h4', {}, '👀 Prévia — escolha os produtos'),
-      candidatos.length ? null : el('div', { class: 'pf-alerta' }, 'Não achei nenhum produto que combine. Use os itens coringa (Ajustes) ou marque à mão.'),
-      el('div', { style: 'color:#aaa;margin-bottom:4px' }, 'Nada foi marcado ainda. Desmarque o que não combina e marque os extras que quiser. ', contador),
-      el('div', { style: 'max-height:260px;overflow:auto' }, ...caixas.map(({ p, c }) =>
-        el('label', { style: 'display:flex;gap:6px;align-items:flex-start;margin:3px 0' }, c,
-          el('span', {}, p.nome, el('br'), el('span', { style: 'color:#888;font-size:11px' }, (p.rotulo === 'livro citado na fala' ? 'livro citado na fala' : ROTULO_ORIGEM[p.origem]) + ' · busca "' + p.busca + '"' + (Number.isFinite(p.tempo) ? ' · falado em ' + mmss(p.tempo) : '') + (p.recente ? ' · já usado num corte recente' : ''))))))].filter(Boolean));
-    acoes(btn('✔ Marcar os escolhidos', () => {
+    const marcar = btn('', () => {
       const lista = caixas.filter(x => x.c.checked).map(x => x.p);
       if (!lista.length) { status('Escolha pelo menos um produto.'); return; }
       rodar(() => etapaMarcar(lista, jaTem));
-    }), btn('Cancelar', () => { etapa = 'inicio'; acoesInicio(); status('Cancelado. Nada foi marcado.'); }, 'sec'), btnAvisar());
+    });
+    const atualizar = () => {
+      const n = caixas.filter(x => x.c.checked).length;
+      marcar.textContent = n ? '✓ Marcar ' + n + ' produto' + (n > 1 ? 's' : '') : 'Escolha um produto';
+      caixas.forEach(x => x.card.classList.toggle('on', x.c.checked));
+    };
+    for (const x of caixas) {
+      const { p, c } = x;
+      const sub = (p.rotulo === 'livro citado na fala' ? 'livro citado na fala' : ROTULO_ORIGEM[p.origem]) + (Number.isFinite(p.tempo) ? ' · falado em ' + mmss(p.tempo) : '') + (p.recente ? ' · já usado num corte recente' : '');
+      x.card = el('label', { class: 'pf-card', title: 'busca: ' + p.busca }, c, el('div', { class: 'pf-ck' }, '✓'), el('div', {}, el('div', { class: 'pf-nome' }, p.nome), el('div', { class: 'pf-sub' }, sub)));
+      c.onchange = atualizar;
+    }
+    const todos = el('a', {}, 'Todos'), nenhum = el('a', {}, 'Nenhum');
+    todos.onclick = () => { caixas.forEach(x => { x.c.checked = true; }); atualizar(); };
+    nenhum.onclick = () => { caixas.forEach(x => { x.c.checked = false; }); atualizar(); };
+    box.append(...[
+      el('div', { class: 'pf-cab' }, el('b', {}, 'Sugestões'), el('span', {}, todos, ' · ', nenhum)),
+      candidatos.length ? null : el('div', { class: 'pf-alerta' }, 'Não achei nenhum produto que combine. Use os itens coringa (⚙ Ajustes) ou marque à mão.'),
+      el('div', { class: 'pf-sub', style: 'margin:0 2px 8px' }, 'Nada foi marcado ainda. Toque nos cartões para escolher.'),
+      el('div', { class: 'pf-cards' }, ...caixas.map(x => x.card))].filter(Boolean));
+    atualizar();
+    acoes(marcar, btn('Cancelar', () => { etapa = 'inicio'; acoesInicio(); status('Cancelado. Nada foi marcado.'); }, 'sec'), btnAvisar());
   }
 
   // Botão de avisar: abre um relatório no GitHub do script (o Claude lê de lá) e copia o relatório completo.
@@ -2012,14 +2123,16 @@
   async function rodar(fn) {
     if (ocupado) return;
     ocupado = true; parar = false; acoesRodando();
+    const pensar = on => { for (const id of ['pf-painel', 'pf-botao']) { const e = document.getElementById(id); if (e) e.classList.toggle('pensando', on); } };
+    pensar(true);
     try { await fn(); }
     catch (e) {
       registrar('ERRO: ' + e.message, diagnostico());
       const box = document.getElementById('pf-conf');
       box.style.display = 'block';
       limpar(box).append(el('div', { class: 'pf-alerta' }, el('b', {}, 'Deu erro: '), e.message, el('br'), 'Clique em "Copiar relatório" e cole na conversa com o Claude.'));
-      acoes(btnAvisar(), btn('▶ Começar de novo', () => rodar(etapaProdutos)), ...(etapa === 'conferir-produtos' ? [btn('Tentar só os tempos', () => rodar(etapaTempos), 'sec')] : []));
-    } finally { ocupado = false; }
+      acoes(btn('▶ Começar de novo', () => rodar(etapaProdutos)), btnAvisar(), ...(etapa === 'conferir-produtos' ? [btn('Tentar só os tempos', () => rodar(etapaTempos), 'sec')] : []));
+    } finally { ocupado = false; pensar(false); try { atualizarFonte(); } catch {} }
   }
 
   function diagnostico() {
