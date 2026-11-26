@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Produtos Flow — marcar produtos no YouTube Studio
 // @namespace    produtos-flow.cortes
-// @version      1.16.0
+// @version      1.16.1
 // @description  Escolhe produtos ligados ao convidado e ao assunto do corte, marca no Studio, distribui os tempos e PARA para conferência humana. Não salva nada sozinho. Sem IA.
 // @match        https://studio.youtube.com/*
 // @grant        GM_xmlhttpRequest
@@ -33,7 +33,7 @@
 
 (function () {
   'use strict';
-  const VERSAO = '1.16.0';
+  const VERSAO = '1.16.1';
 
   // ====================================================================================
   //  LISTAS — para acrescentar convidado ou tema, copie um bloco e troque os textos.
@@ -953,7 +953,7 @@
   const cfg = {
     alvo: Number(GM_getValue('alvo', 10)) || 10,
     auto: GM_getValue('auto', true) !== false,
-    maximo: Number(GM_getValue('maximo', 10)) || 10,
+    maximo: Number(GM_getValue('maximo', 15)) || 15,
     minimo: Number(GM_getValue('minimo', 5)) || 5,
     extras: String(GM_getValue('extras', '')),
     dica: '',
