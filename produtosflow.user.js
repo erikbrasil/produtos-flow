@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Produtos Flow — marcar produtos no YouTube Studio
 // @namespace    produtos-flow.cortes
-// @version      1.16.1
+// @version      1.16.3
 // @description  Escolhe produtos ligados ao convidado e ao assunto do corte, marca no Studio, distribui os tempos e PARA para conferência humana. Não salva nada sozinho. Sem IA.
 // @match        https://studio.youtube.com/*
 // @grant        GM_xmlhttpRequest
@@ -33,7 +33,7 @@
 
 (function () {
   'use strict';
-  const VERSAO = '1.16.1';
+  const VERSAO = '1.16.3';
 
   // ====================================================================================
   //  LISTAS — para acrescentar convidado ou tema, copie um bloco e troque os textos.
@@ -264,6 +264,18 @@
         ['Coqueteleira', [['coqueteleira']]],
       ],
     },
+    'nutricao': {
+      nome: 'Nutrição / Saúde',
+      chaves: ['nutric*', 'nutricionist*', 'gordura*', 'carboidrat*', 'insulina', 'jejum', 'acucar', 'low carb', 'cetogenic*', 'keto', 'emagrec*', 'obesidade', 'obeso*', 'glicose', 'diabet*', 'colesterol', 'trigo', 'gluten', 'proteina*', 'caloria*', 'alimentac*', 'ultraprocessad*', 'vitamina*', 'medico*', 'saude'],
+      buscas: [
+        ['Livro nutrição', [['livro'], ['nutric*', 'alimenta*', 'dieta*']]],
+        ['Livro low carb', [['livro'], ['low carb', 'cetogenic*', 'carboidrat*']]],
+        ['Livro jejum intermitente', [['livro'], ['jejum']]],
+        ['Barriga de Trigo William Davis', [['barriga de trigo']]],
+        ['Balança de bioimpedância', [['balanca'], ['bioimpedancia', 'corporal']]],
+        ['Medidor de glicose', [['glicose', 'glicosimetro']]],
+      ],
+    },
     'tecnologia': {
       nome: 'Tecnologia',
       chaves: ['inteligencia artificial', 'ia', 'tecnologia*', 'celular*', 'iphone', 'computador*', 'programacao', 'chatgpt', 'robo*', 'algoritmo*', 'internet', 'redes sociais', 'rede social'],
@@ -336,6 +348,7 @@
     { chaves: ['celular*', 'redes sociais', 'rede social', 'tiktok', 'instagram', 'vicio em tela', 'dopamina'], buscas: [['Livro Nação Dopamina', [['dopamina']]], ['Livro vício em redes sociais', [['livro'], ['redes sociais', 'digital', 'celular']]]] },
     { chaves: ['inteligencia artificial', 'chatgpt', 'robo*', 'automacao'], buscas: [['Livro inteligência artificial', [['livro'], ['inteligencia artificial', 'ia']]]] },
     { chaves: ['games', 'videogame*', 'playstation', 'xbox', 'nintendo', 'jogar'], buscas: [['Controle PS5 DualSense', [['dualsense', 'controle']]], ['Headset gamer', [['headset']]]] },
+    { chaves: ['nutric*', 'nutricionist*', 'gordura*', 'carboidrat*', 'insulina', 'jejum', 'acucar', 'low carb', 'cetogenic*', 'keto', 'emagrec*', 'obesidade', 'glicose', 'diabet*', 'colesterol', 'trigo', 'gluten'], buscas: [['Livro nutrição', [['livro'], ['nutric*', 'alimenta*', 'dieta*']]], ['Livro low carb', [['livro'], ['low carb', 'cetogenic*', 'carboidrat*']]], ['Livro jejum intermitente', [['livro'], ['jejum']]], ['Barriga de Trigo William Davis', [['barriga de trigo']]]] },
     { chaves: ['academia', 'treino*', 'musculacao', 'dieta*', 'whey', 'creatina'], buscas: [['Creatina', [['creatina']]], ['Whey protein', [['whey']]]] },
     { chaves: ['guerra mundial', 'nazis*', 'hitler', 'segunda guerra'], buscas: [['Livro Segunda Guerra Mundial', [['livro'], ['segunda guerra', 'guerra mundial']]]] },
     { chaves: ['crime*', 'faccao', 'faccoes', 'pcc', 'comando vermelho', 'trafic*', 'seguranca publica'], buscas: [['Livro crime organizado', [['livro'], ['crime', 'faccao', 'pcc', 'trafico']]]] },
@@ -522,8 +535,15 @@
       // a fala do corte (legenda automática) conta como assunto DO CORTE
       const naFala = transcricao ? frequencia(transcricao, t.chaves) : 0;
       pontos += Math.min(6, naFala);
-      const doCorte = contar(titulo || '', t.chaves) > 0 || naFala >= 3;
-      if (pontos >= 1) temas.push({ id, nome: t.nome, pontos: pontos + (doCorte ? 10 : 0), doCorte });
+      const noTitulo = contar(titulo || '', t.chaves) > 0;
+      const doCorte = noTitulo || naFala >= 3;
+      if (pontos >= 1) temas.push({ id, nome: t.nome, pontos: pontos + (doCorte ? 10 : 0), doCorte, naFala, noTitulo });
+    }
+    // com a fala do corte: assunto que aparece bem menos que o principal não é assunto do corte
+    // (um papo de nutrição que fala "governo" 3 vezes não vira corte de política)
+    if (transcricao) {
+      const topo = Math.max(0, ...temas.map(t => t.naFala));
+      for (const t of temas) if (!t.noTitulo && t.doCorte && t.naFala < Math.max(3, topo * 0.4)) { t.doCorte = false; t.pontos -= 10 + Math.min(6, t.naFala); }
     }
     temas.sort((a, b) => b.pontos - a.pontos);
     // se o corte tem assunto claro, os assuntos fracos (só do episódio) ficam de fora
@@ -773,7 +793,8 @@
     const girar = lista => { const k = lista.length ? (det.semente || 0) % lista.length : 0; return [...lista.slice(k), ...lista.slice(0, k)]; };
     const chavesDaBusca = b => palavrasFortes(b).map(w => w.length > 4 ? w.slice(0, w.length - 1) + '*' : w);
     // com a fala do corte em mãos, da lista fixa do assunto só entra o que foi falado (nada de "Terço" num papo sobre judaísmo)
-    const falada = b => !det.falaTexto || frequencia(det.falaTexto, chavesDaBusca(b)) > 0;
+    // palavra INTEIRA (e plural): "príncipe" tem de ser falado; "principal" não conta
+    const falada = b => !det.falaTexto || palavrasFortes(b).some(w => frequencia(det.falaTexto, [w, w + 's', w.replace(/ao$/, 'oes')]) > 0);
     for (const c of det.citados || []) {
       for (const b of c.buscas) fila.push({ busca: b, exige: [c.exige], recusa: [], origem: 'citado', rotulo: c.nome, chaves: c.apelidos });
     }
