@@ -1,13 +1,14 @@
 // ==UserScript==
 // @name         Produtos Flow — marcar produtos no YouTube Studio
 // @namespace    produtos-flow.cortes
-// @version      1.18.0
+// @version      1.19.0
 // @description  Escolhe produtos ligados ao convidado e ao assunto do corte, marca no Studio, distribui os tempos e PARA para conferência humana. Não salva nada sozinho. Sem IA.
 // @match        https://studio.youtube.com/*
 // @grant        GM_xmlhttpRequest
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_setClipboard
+// @grant        GM_openInTab
 // @grant        unsafeWindow
 // @connect      www.youtube.com
 // @connect      pt.wikipedia.org
@@ -33,7 +34,7 @@
 
 (function () {
   'use strict';
-  const VERSAO = '1.18.0';
+  const VERSAO = '1.19.0';
 
   // ====================================================================================
   //  LISTAS — para acrescentar convidado ou tema, copie um bloco e troque os textos.
@@ -578,7 +579,19 @@
   // Com horários ("00:01:02,345 --> 00:01:05,000" ou "00;01;02;10 - 00;01;05;00") cada trecho já vem com o segundo
   // em que é falado; texto puro vira frases com posição proporcional (igual à legenda do YouTube).
   function lerArquivoTranscricao(texto) {
-    const linhas = String(texto || '').replace(/\r/g, '').split('\n');
+    let bruto = String(texto || '').replace(/\r/g, '');
+    // pedido pronto pro ChatGPT (programa de transcrição): pula as instruções e fica só com a TRANSCRIÇÃO
+    const cab = /^\s*TRANSCRI[ÇC][ÃA]O\b.*$/im.exec(bruto);
+    if (cab) bruto = bruto.slice(cab.index + cab[0].length);
+    // "[1:02] fala…" (minutagem real entre colchetes)
+    const comColchete = [...bruto.matchAll(/^\s*\[(\d{1,2}(?::\d{2}){1,2})\]\s*(.+)$/gm)];
+    if (comColchete.length >= 3) {
+      const seg = t => t.split(':').map(Number).reduce((n, x) => n * 60 + x, 0);
+      const segs = comColchete.map(m => ({ ini: seg(m[1]), texto: m[2].trim() }));
+      segs.forEach((x, i) => { x.fim = segs[i + 1] ? segs[i + 1].ini : x.ini + 30; });
+      return { comTempo: true, segs };
+    }
+    const linhas = bruto.split('\n');
     const tc = '(\\d{1,2}[:;.]\\d{2}[:;.]\\d{2}(?:[,.:;]\\d{1,3})?|\\d{1,2}[:;]\\d{2}(?:[,.]\\d{1,3})?)';
     const reTempo = new RegExp('^\\s*' + tc + '\\s*(?:-->|–|-)\\s*' + tc);
     const seg = t => { const p = t.split(/[:;.,]/).map(Number); const [h, m, x] = p.length >= 4 ? [p[0], p[1], p[2]] : p.length === 3 && /[,.]\d{3}$/.test(t) ? [0, p[0], p[1]] : p.length === 3 ? [p[0], p[1], p[2]] : [0, p[0], p[1]]; return h * 3600 + m * 60 + x; };
@@ -602,6 +615,52 @@
     const out = []; let pos = 0;
     for (const f of frases) { out.push({ p: pos / corpo.length, texto: f }); pos += f.length + 1; }
     return { comTempo: false, segs: out };
+  }
+  // ===== ChatGPT: pedido pronto e leitura da resposta =====
+  function pedidoChatGPT(titulo, segs, extras) {
+    const linhas = []; let bloco = [], ini = null;
+    for (const sg of segs || []) {
+      const t = Number.isFinite(sg.ini) ? sg.ini : 0;
+      if (ini === null) ini = t;
+      bloco.push(sg.texto);
+      if (t - ini >= 25) { linhas.push('[' + mmss(ini) + '] ' + bloco.join(' ')); bloco = []; ini = null; }
+    }
+    if (bloco.length) linhas.push('[' + mmss(ini || 0) + '] ' + bloco.join(' '));
+    let transcricao = linhas.join('\n');
+    if (transcricao.length > 24000) transcricao = transcricao.slice(0, 24000) + '\n[…]';
+    return [
+      'Você vai escolher produtos para marcar no YouTube Shopping de um corte do Flow Podcast.',
+      'Título do corte: ' + (titulo || '(sem título)') + (extras ? '\n' + extras : ''),
+      '',
+      'Leia a transcrição e sugira de 10 a 15 produtos que combinem com o que é FALADO no corte:',
+      '- livros citados na conversa ou sobre o assunto principal;',
+      '- produtos e objetos mencionados;',
+      '- coisas do universo do convidado (discos, instrumentos, equipamentos, jogos, suplementos etc.).',
+      'Regras:',
+      '- precisa ser algo vendido em lojas como Amazon, Shopee ou Mercado Livre;',
+      '- escreva um termo de busca curto (2 a 6 palavras), do jeito que se procura na loja (ex.: livro O Capital Karl Marx; teclado Yamaha; balança de bioimpedância);',
+      '- nada genérico sem ligação com a conversa; não repita produtos;',
+      '- use o minuto em que o assunto aparece na transcrição.',
+      'Responda SÓ com as linhas, sem comentários e sem numeração, neste formato exato:',
+      'm:ss | termo de busca | motivo curto',
+      '',
+      'TRANSCRIÇÃO',
+      transcricao,
+    ].join('\n');
+  }
+  function lerRespostaChatGPT(texto) {
+    const out = [];
+    const seg = t => t.split(':').map(Number).reduce((n, x) => n * 60 + x, 0);
+    const limpo = String(texto || '').replace(/\r/g, '').replace(/\*\*/g, '');
+    for (const m of limpo.matchAll(/(?:^|\n|\s)(?:\d+[.)]\s*)?\[?(\d{1,2}:\d{2}(?::\d{2})?)\]?\s*[|\-–—]\s*([^|\n]{2,80}?)\s*(?:\|[^\n]*)?(?=\n|$)/g)) {
+      const busca = m[2].split(/\s+[–—-]\s+/)[0].replace(/^["“'`]+|["”'`.]+$/g, '').trim();
+      if (busca && !out.some(o => norm(o.busca) === norm(busca))) out.push({ tempo: seg(m[1]), busca });
+    }
+    if (!out.length) for (const l of limpo.split('\n')) {
+      const partes = l.split('|').map(x => x.trim()).filter(Boolean);
+      if (partes.length >= 2 && partes[0].length < 80 && !/termo de busca/i.test(partes[0])) out.push({ tempo: null, busca: partes[0].replace(/^\d+[.)]\s*/, '') });
+    }
+    return out.slice(0, 20);
   }
   // Nome do convidado dentro do corte. Título no formato "BRENO ALTMAN: um judeu diferente" (aceito só se o
   // nome aparecer com letra maiúscula na fala, para não confundir com "GUERRA NUCLEAR:") e a apresentação
@@ -983,7 +1042,7 @@
   const mmss = s => Math.floor(s / 60) + ':' + String(Math.floor(s % 60)).padStart(2, '0');
 
   if (typeof module !== 'undefined' && module.exports) {
-    module.exports = { lerArquivoTranscricao, nomesNoCorte, planoPorFala, assuntosDaFala, expressoesDaFala, semPropaganda, MAPA_FALA, livrosCitados, momentoNaFala, atribuirTrechos, palavrasDaFala, frequencia, palavrasDoTitulo, produtosParaCobrir, cobertura, ehPessoa, repetido, CITADOS, CORINGAS_PADRAO, norm, tem, detectar, planoDeBuscas, aceita, escolher, planoDeTempos, linkEpisodio, nomeDoEpisodio, nomesDoEpisodio, titulo1, limparDescricao, lerExtras, CONVIDADOS, TEMAS, INDISPONIVEL };
+    module.exports = { pedidoChatGPT, lerRespostaChatGPT, lerArquivoTranscricao, nomesNoCorte, planoPorFala, assuntosDaFala, expressoesDaFala, semPropaganda, MAPA_FALA, livrosCitados, momentoNaFala, atribuirTrechos, palavrasDaFala, frequencia, palavrasDoTitulo, produtosParaCobrir, cobertura, ehPessoa, repetido, CITADOS, CORINGAS_PADRAO, norm, tem, detectar, planoDeBuscas, aceita, escolher, planoDeTempos, linkEpisodio, nomeDoEpisodio, nomesDoEpisodio, titulo1, limparDescricao, lerExtras, CONVIDADOS, TEMAS, INDISPONIVEL };
     return;
   }
 
@@ -1433,6 +1492,62 @@
     });
   }
 
+  // transcrição disponível agora (arquivo/pasta, legenda já lida ou a da última rodada)
+  function segsDisponiveis() {
+    const id = idDoVideo();
+    if (transcricaoArquivo && (!id || transcricaoArquivo.id === id) && transcricaoArquivo.dados.comTempo) return transcricaoArquivo.dados.segs;
+    const durs = todos('video').map(v => v.duration).filter(n => Number.isFinite(n) && n > 0);
+    const dur = durs.length ? Math.max(...durs) : 0;
+    if (transcricaoArquivo && (!id || transcricaoArquivo.id === id)) return transcricaoArquivo.dados.segs.map(x => ({ ini: x.p * dur, texto: x.texto }));
+    if (id) { try { const g = JSON.parse(GM_getValue('legenda:' + id, '') || 'null'); if (g && g.segs && g.segs.length) return g.segs.map(x => ({ ini: x.p * (dur || g.dur || 0), texto: x.texto })); } catch {} }
+    if (previa.segs && previa.segs.length) return previa.segs;
+    return null;
+  }
+  async function copiarPedidoGPT() {
+    const segs = segsDisponiveis();
+    if (!segs) { status('Ainda não tenho a transcrição: escolha Pasta ou Arquivo, ou clique em Começar uma vez para ler a legenda.'); return; }
+    const titulo = await lerTitulo().catch(() => '');
+    const conv = ultimaDeteccao && ultimaDeteccao.convidados && ultimaDeteccao.convidados.length ? 'Convidado: ' + ultimaDeteccao.convidados.join(', ').replace(/ \(do episódio\)/g, '') : '';
+    GM_setClipboard(pedidoChatGPT(titulo, segs, conv), 'text');
+    status('Pedido copiado (' + segs.length + ' trechos). Cole no ChatGPT (Ctrl+V e Enter), copie a resposta e clique em "Colar resposta".');
+    try { GM_openInTab('https://chatgpt.com/', { active: true }); } catch {}
+  }
+  async function colarRespostaGPT() {
+    let texto = '';
+    try { texto = await navigator.clipboard.readText(); } catch {}
+    let itens = lerRespostaChatGPT(texto);
+    if (!itens.length) { texto = window.prompt('Cole aqui a resposta do ChatGPT (as linhas "m:ss | termo | motivo"):', '') || ''; itens = lerRespostaChatGPT(texto); }
+    if (!itens.length) { status('Não reconheci a resposta. Ela precisa ter linhas assim: 3:12 | livro O Capital | motivo'); return; }
+    rodar(() => etapaGPT(itens));
+  }
+  async function etapaGPT(itens) {
+    registrar('ChatGPT sugeriu ' + itens.length + ' produto(s): ' + itens.map(i => i.busca).join('; '));
+    const painel = await abrirSeletor();
+    await espera(1000);
+    const jaTem = contagemMarcados(painel) || 0;
+    const durs = todos('video').map(v => v.duration).filter(n => Number.isFinite(n) && n > 0);
+    const duracaoVideo = durs.length ? Math.max(...durs) : NaN;
+    let alvo = cfg.alvo;
+    if (cfg.auto && Number.isFinite(duracaoVideo)) alvo = Math.min(cfg.maximo, Math.max(cfg.minimo, produtosParaCobrir(duracaoVideo)));
+    const faltam = Math.max(0, alvo - jaTem);
+    previa.alternativas = new Map();
+    const achados = [], candidatos = [];
+    for (const it of itens) {
+      if (parar) throw Error('Parado por você.');
+      const fortes = palavrasFortes(it.busca).filter(w => w !== 'livro');
+      const exige = fortes.length >= 2 ? [[fortes[0]], fortes.slice(1)] : fortes.length ? [[fortes[0]]] : [];
+      const q = { busca: it.busca, exige, recusa: /^livro\b/i.test(it.busca) ? RECUSA_LIVRO : ['adesivo', 'capinha', 'pelicula'], origem: 'gpt', rotulo: 'sugestão do ChatGPT', chaves: fortes, tempo: Number.isFinite(it.tempo) ? it.tempo : null };
+      const r = await buscarComCache(painel, q);
+      achados.push(...r.aceitos);
+      const primeiro = r.aceitos.find(a => !candidatos.some(c => repetido(c.nome, a.nome)));
+      if (primeiro) candidatos.push(primeiro); else registrar('  nada na loja para: ' + it.busca);
+    }
+    Object.assign(previa, { achados, pulados: [], duracao: duracaoVideo, faltam, jaTem, recentes: [], segs: segsDisponiveis() });
+    etapa = 'previa';
+    registrar('PRÉVIA (ChatGPT): ' + candidatos.length + ' produto(s) achados na loja.');
+    status(candidatos.length ? 'Sugestões do ChatGPT encontradas no Studio. Escolha e clique em Marcar.' : 'Nenhum produto do ChatGPT foi achado nas lojas do Studio.');
+    mostrarSugestoes(candidatos, Math.min(candidatos.length, Math.max(faltam, 1)), jaTem);
+  }
   async function etapaTempos() {
     let p = painelProdutos();
     if (!p) throw Error('A janela de produtos fechou. Abra de novo e clique em "Começar".');
@@ -1483,6 +1598,7 @@
     registrar(cob.faltaProdutos ? 'Atenção: ' + linhas.length + ' produtos cobrem ' + mmss(cob.coberto) + ' de ' + mmss(cob.total) + '. Para não sobrar buraco, faltam ' + cob.faltaProdutos + ' produto(s).' : 'Os tempos cobrem o vídeo todo, sem buraco.');
 
     // de trás para frente: o Studio corta um intervalo novo no começo do próximo
+    const naoConfirmados = [];
     for (let k = plano.length - 1; k >= 0; k--) {
       if (parar) throw Error('Parado por você.');
       const passo = plano[k];
@@ -1506,16 +1622,24 @@
       if (!posicionou) throw Error('O Studio não moveu o cursor para ' + mmss(passo.inicio) + '. Nenhum tempo foi colocado nesse ponto.');
       linha = acharLinha(lk);
       if (!linha || linha.marcado) throw Error('A linha do produto ' + (lk + 1) + ' mudou durante a operação.');
+      const intervalosNaTela = () => raizes(painel).map(r => (r.textContent || '')).join(' ').match(/\d+:\d{2}(?::\d{2})?\s*[-–]\s*\d+:\d{2}/g)?.length || 0;
+      const antes = intervalosNaTela();
       linha.add.scrollIntoView({ block: 'center' });
       await humano();
       linha.add.click();
       let feito = null;
-      for (let i = 0; i < 40; i++) { await espera(100); const l = acharLinha(lk); if (l && l.marcado) { feito = l; break; } }
-      if (!feito) throw Error('O Studio não confirmou o tempo de: ' + linha.nome + '. Não repeti o clique.');
+      for (let i = 0; i < 60; i++) {
+        await espera(100);
+        const l = acharLinha(lk);
+        if (l && l.marcado) { feito = l; break; }
+        if (intervalosNaTela() > antes) { feito = l || linha; break; } // o Studio pôs o intervalo, mesmo que a linha não mostre
+      }
+      if (!feito) { naoConfirmados.push(linha.nome); registrar('Atenção: o Studio não confirmou o tempo de "' + linha.nome.slice(0, 60) + '". Não repeti o clique; confira esse na Parada 2.'); continue; }
       const iv = feito.intervalo;
       registrar('Tempo ' + (k + 1) + ': ' + (iv ? mmss(iv.inicio) + '–' + mmss(iv.fim) : 'a partir de ' + mmss(passo.inicio)) + ' — ' + linha.nome.slice(0, 60) + (Number.isFinite(prefs[lk]) ? ' (falado em ' + mmss(prefs[lk]) + ')' : ''));
     }
     etapa = 'conferir-tempos';
+    if (naoConfirmados.length) registrar('Confira com atenção (o Studio não confirmou): ' + naoConfirmados.map(n => n.slice(0, 40)).join('; '));
     registrar('PARADA PARA CONFERÊNCIA: tempos colocados. Confira e clique em "Pronto" no Studio.');
     mostrarFinal();
   }
@@ -1729,7 +1853,7 @@
       for await (const [nome, item] of dir.entries()) {
         if (item.kind === 'directory') { if (nivel < 2 && !/^(\.|node_modules|\$)/.test(nome)) await varre(item, nivel + 1); continue; }
         if (!/\.(srt|vtt|txt)$/i.test(nome)) continue;
-        const semExt = nome.replace(/\.(transcricao\.)?(srt|vtt|txt)$/i, '').replace(/\.transcricao$/i, '');
+        const semExt = nome.replace(/\.(transcricao\.|prompt_chatgpt\.)?(srt|vtt|txt)$/i, '').replace(/\.(transcricao|prompt_chatgpt)$/i, '');
         const n = norm(semExt);
         let nota = 0;
         if (alvoN && n === alvoN) nota = 100;
@@ -1740,7 +1864,7 @@
           const frac = pa.size ? comum / Math.max(pa.size, pb.size) : 0;
           if (frac >= 0.6) nota = 50 + Math.round(frac * 20);
         }
-        if (nota) { if (/\.srt$/i.test(nome)) nota += 3; else if (/\.vtt$/i.test(nome)) nota += 2; achados.push({ nome, item, nota }); }
+        if (nota) { if (/\.srt$/i.test(nome)) nota += 3; else if (/\.vtt$/i.test(nome)) nota += 2; if (/prompt|youtube\.txt|metadados|descri/i.test(nome)) nota -= 12; achados.push({ nome, item, nota }); }
       }
     };
     await varre(h, 0);
@@ -1879,6 +2003,8 @@
   .pf-tl-aviso{font-size:11.5px;color:#ffd60a;margin:5px 2px 0}
   .pf-tl-aviso.ok{color:#32d74b}
   #pf-acoes button.pf:nth-child(2){margin-right:6px}
+  .pf-gpt{display:flex;gap:6px;margin-top:10px}
+  #pf-painel .pf-gpt button.pf{flex:1;margin:0;padding:9px 6px;font-size:12px}
   #pf-log{max-height:160px;overflow:auto;font:11px ui-monospace,monospace;color:rgba(235,235,245,.7);white-space:pre-wrap}
   #pf-painel details summary{cursor:pointer;color:rgba(235,235,245,.8)}
   `;
@@ -1998,6 +2124,10 @@
       };
       leitor.readAsText(f, 'utf-8');
     };
+    const botaoPedido = el('button', { class: 'pf sec', id: 'pf-pedido-gpt', type: 'button' }, '✦ Copiar pedido pro ChatGPT');
+    const botaoResposta = el('button', { class: 'pf sec', id: 'pf-resposta-gpt', type: 'button' }, '⤓ Colar resposta');
+    botaoPedido.onclick = () => { copiarPedidoGPT().catch(e => status('Erro: ' + e.message)); };
+    botaoResposta.onclick = () => { if (ocupado) { status('Espere terminar o que está rodando.'); return; } colarRespostaGPT().catch(e => status('Erro: ' + e.message)); };
     const marca = el('div', { class: 'pf-marca' });
     const icone = el('div', { class: 'pf-icone' }); icone.append(iconeCarrinho());
     marca.append(icone, el('div', {}, el('div', {}, 'Produtos Flow ', el('small', {}, 'v' + VERSAO)), el('div', { class: 'pf-pensa' }, 'procurando produtos…')));
@@ -2010,6 +2140,8 @@
         el('div', { class: 'pf-fontes' }, botaoPasta, botaoArquivo, botaoYt),
         el('div', { id: 'pf-usando' }, ''),
         el('div', { class: 'pf-links' }, trocarPasta, ' · ', procurarDeNovo, rotuloArquivo, entradaArquivo),
+        el('div', { class: 'pf-gpt' }, botaoPedido, botaoResposta),
+        el('div', { class: 'pf-links', style: 'margin-top:2px' }, 'Com o ChatGPT: copie o pedido, cole lá, copie a resposta e clique em "Colar resposta".'),
         el('div', { class: 'pf-rotulo' }, 'Assunto do corte'), dica,
         el('div', { id: 'pf-status' }, 'Abra o vídeo (detalhes) ou o rascunho e clique em Começar.')),
       el('section', { id: 'pf-conf', style: 'display:none' }),
@@ -2088,7 +2220,7 @@
       ...Object.entries(d.wiki || {}).map(([k, v]) => cinza('Wikipédia (' + k + '): ' + v.slice(0, 140) + '…'))].filter(Boolean));
   }
 
-  const ROTULO_ORIGEM = { aprovado: 'aprovado antes', 'convidado-produto': 'do convidado', fala: 'assunto falado no corte', citado: 'citado no corte', tema: 'assunto do corte', titulo: 'palavra do corte (título/fala)', convidado: 'convidado', 'tema-ep': 'assunto do episódio', coringa: 'coringa' };
+  const ROTULO_ORIGEM = { gpt: 'sugestão do ChatGPT', aprovado: 'aprovado antes', 'convidado-produto': 'do convidado', fala: 'assunto falado no corte', citado: 'citado no corte', tema: 'assunto do corte', titulo: 'palavra do corte (título/fala)', convidado: 'convidado', 'tema-ep': 'assunto do episódio', coringa: 'coringa' };
 
   function mostrarSugestoes(candidatos, faltam, jaTem, escolhidosAntes) {
     const box = limpar(document.getElementById('pf-conf'));
